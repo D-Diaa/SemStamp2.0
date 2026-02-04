@@ -7,14 +7,14 @@ import torch
 from bert_score import score as bert_score_func
 import matplotlib.pyplot as plt
 import os
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 rng = torch.Generator(device)
+
 
 def run_bert_score(gen_sents, para_sents, max_len=450, batch_size=32):
     if not gen_sents or not para_sents:
         return 0.0
-    # Use roberta-large instead of deberta-xlarge-mnli due to tokenizer overflow
-    # bug with transformers 5.0.0 and bert-score 0.3.13
     P, R, F1 = bert_score_func(
         gen_sents, para_sents,
         model_type="roberta-large",
@@ -23,6 +23,7 @@ def run_bert_score(gen_sents, para_sents, max_len=450, batch_size=32):
         batch_size=batch_size
     )
     return torch.mean(F1).item()
+
 
 def flatten_gens_and_paras(gens, paras):
     new_gens = []
@@ -43,90 +44,67 @@ def truncate_to_max_length(texts, max_length):
         new_texts.append(t)
     return new_texts
 
-def detect_kmeans(sents, embedder, lmbd, k_dim, cluster_centers):
-    n_sent = len(sents)
-    n_watermark = 0
-    curr_cluster_id = get_cluster_id(
-        sents[0], embedder=embedder, cluster_centers=cluster_centers)
-    cluster_mask = get_cluster_mask(curr_cluster_id, k_dim, lmbd)
-    # print(f"Prompt: {sents[0]}")
-    for i in range(1, n_sent):
-        curr_cluster_id = get_cluster_id(
-            sents[i], embedder=embedder, cluster_centers=cluster_centers)
-        # print(f'sentence {i}: {sents[i]}')
-        # print(f'k-means index in accept_mask: {curr_cluster_id in cluster_mask}')
-        # print(f'curr_cluster_id: {curr_cluster_id}')
-        if curr_cluster_id in cluster_mask:
-            n_watermark += 1
-        cluster_mask = get_cluster_mask(curr_cluster_id, k_dim, lmbd)
-    n_test_sent = n_sent - 1  # exclude the prompt
-    num = n_watermark - lmbd * (n_test_sent)
-    denom = np.sqrt((n_test_sent) * lmbd * (1-lmbd))
-    # print(f'n_watermark: {n_watermark}, n_test_sent: {n_test_sent}')
+
+def compute_zscore(n_watermark, n_test_sent, lmbd):
+    """Compute z-score from watermark count."""
+    num = n_watermark - lmbd * n_test_sent
+    denom = np.sqrt(n_test_sent * lmbd * (1 - lmbd))
     return num / denom
 
-def detect_lsh(sents, lsh_model, lmbd, lsh_dim, cutoff=None):
-    if cutoff == None:
-        cutoff = lsh_dim
+
+def detect_lsh(sents, lsh_model, lmbd, lsh_dim, secret_message=None):
+    """
+    Detect LSH watermark in sentences.
+    If secret_message is provided, use fixed mode (same mask for all sentences).
+    Otherwise, use context-dependent mode (mask depends on previous sentence).
+    """
     n_sent = len(sents)
     n_watermark = 0
-    lsh_seed = lsh_model.get_hash([sents[0]])[0]
+    if secret_message is None:
+        lsh_seed = lsh_model.get_hash([sents[0]])[0]
+    else:
+        lsh_seed = lsh_model.get_hash([secret_message])[0]
     accept_mask = get_mask_from_seed(lsh_dim, lmbd, lsh_seed)
-    for i in range(1, len(sents)):
+    for i in range(1, n_sent):
         lsh_candidate = lsh_model.get_hash([sents[i]])[0]
         if lsh_candidate in accept_mask:
             n_watermark += 1
-        lsh_seed = lsh_candidate
-        accept_mask = get_mask_from_seed(lsh_dim, lmbd, lsh_seed)
-    n_test_sent = n_sent - 1  # exclude the prompt and the ending
-    num = n_watermark - lmbd * (n_test_sent)
-    denom = np.sqrt((n_test_sent) * lmbd * (1-lmbd))
-    # print(f'n_watermark: {n_watermark}, n_test_sent: {n_test_sent}')
-    zscore = num / denom
-    # print(f"zscore: {zscore}")
-    return zscore
+        if secret_message is None:
+            lsh_seed = lsh_candidate
+            accept_mask = get_mask_from_seed(lsh_dim, lmbd, lsh_seed)
+    n_test_sent = n_sent - 1  # exclude the prompt
+
+    return compute_zscore(n_watermark, n_test_sent, lmbd)
 
 
-def detect_lsh_fixed(sents, lsh_model, lmbd, lsh_dim, secret_message):
-    """Detect watermark using fixed LSH seed from secret message."""
+def detect_kmeans(sents, embedder, lmbd, k_dim, cluster_centers, secret_message=None):
+    """
+    Detect k-means watermark in sentences.
+    If secret_message is provided, use fixed mode (same mask for all sentences).
+    Otherwise, use context-dependent mode (mask depends on previous sentence).
+    """
     n_sent = len(sents)
     n_watermark = 0
-    # Use secret message hash as the fixed seed for all sentences
-    fixed_lsh_seed = lsh_model.get_hash([secret_message])[0]
-    accept_mask = get_mask_from_seed(lsh_dim, lmbd, fixed_lsh_seed)
-    # Check all sentences (no prompt exclusion since seed is fixed)
-    for i in range(n_sent):
-        lsh_candidate = lsh_model.get_hash([sents[i]])[0]
-        if lsh_candidate in accept_mask:
-            n_watermark += 1
-    n_test_sent = n_sent
-    num = n_watermark - lmbd * n_test_sent
-    denom = np.sqrt(n_test_sent * lmbd * (1-lmbd))
-    zscore = num / denom
-    return zscore
-
-
-def detect_kmeans_fixed(sents, embedder, lmbd, k_dim, cluster_centers, secret_message):
-    """Detect watermark using fixed cluster ID from secret message."""
-    n_sent = len(sents)
-    n_watermark = 0
-    # Use secret message cluster ID as the fixed seed for all sentences
-    fixed_cluster_id = get_cluster_id(secret_message, embedder=embedder, cluster_centers=cluster_centers)
-    cluster_mask = get_cluster_mask(fixed_cluster_id, k_dim, lmbd)
-    # Check all sentences (no prompt exclusion since seed is fixed)
-    for i in range(n_sent):
+    if secret_message is None:
+        curr_cluster_id = get_cluster_id(sents[0], embedder=embedder, cluster_centers=cluster_centers)
+    else:
+        curr_cluster_id = get_cluster_id(secret_message, embedder=embedder, cluster_centers=cluster_centers)
+    cluster_mask = get_cluster_mask(curr_cluster_id, k_dim, lmbd)
+    for i in range(1, n_sent):
         curr_cluster_id = get_cluster_id(sents[i], embedder=embedder, cluster_centers=cluster_centers)
         if curr_cluster_id in cluster_mask:
             n_watermark += 1
-    n_test_sent = n_sent
-    num = n_watermark - lmbd * n_test_sent
-    denom = np.sqrt(n_test_sent * lmbd * (1-lmbd))
-    return num / denom
+        if secret_message is None:
+            cluster_mask = get_cluster_mask(curr_cluster_id, k_dim, lmbd)
+    n_test_sent = n_sent - 1  # exclude the prompt
+    return compute_zscore(n_watermark, n_test_sent, lmbd)
+
 
 def get_roc_metrics(labels, preds):
     fpr, tpr, _ = roc_curve(labels, preds)
     roc_auc = auc(fpr, tpr)
     return fpr.tolist(), tpr.tolist(), float(roc_auc)
+
 
 def get_roc_metrics_from_zscores(m, mp, h, dataset_path):
     mp = np.nan_to_num(mp)
@@ -161,6 +139,5 @@ def evaluate_z_scores(mz, mpz, hz, dataset_path):
             fpr_5_threshold = z_threshold
     mp_area, mp_fpr = get_roc_metrics_from_zscores(mz, mpz, hz, dataset_path)
     if fpr_1_threshold == 0:
-        fpr_1_threshold = 2.33 # according to standard z-score table
+        fpr_1_threshold = 2.33  # according to standard z-score table
     return mp_area, len(mpz[mpz > fpr_1_threshold]) / len(mpz), len(mpz[mpz > fpr_5_threshold]) / len(mpz)
-
