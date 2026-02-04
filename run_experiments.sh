@@ -16,6 +16,7 @@ KMEANS_DIM=8
 CC_PATH="data/c4-train/cc.pt"
 DELTA=0.02
 HUMAN_TEXT="data/c4-human"
+PARAPHRASER="parrot"
 
 # Parse command line arguments
 usage() {
@@ -29,6 +30,7 @@ usage() {
     echo "  --cc-path PATH        Path to cluster centers (default: data/c4-train/cc.pt)"
     echo "  --delta DELTA         Delta/margin parameter (default: 0.02)"
     echo "  --human-text PATH     Path to human text data (default: data/c4-human)"
+    echo "  --paraphraser NAME    Paraphraser model to use (default: pegasus)"
     echo "  --modes MODES         Comma-separated modes to run (default: lsh,lsh_fixed,kmeans,kmeans_fixed)"
     echo "  -h, --help            Show this help message"
     exit 1
@@ -64,6 +66,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --human-text)
             HUMAN_TEXT="$2"
+            shift 2
+            ;;
+        --paraphraser)
+            PARAPHRASER="$2"
             shift 2
             ;;
         --modes)
@@ -137,12 +143,17 @@ run_experiment() {
         echo "=== PARAPHRASING: ${mode} ==="
         echo "Input: ${gen_path}"
 
-        CUDA_VISIBLE_DEVICES=${gpu} python paraphrase_gen.py "${gen_path}"
+        CUDA_VISIBLE_DEVICES=${gpu} python paraphrase_gen.py "${gen_path}" --paraphraser "${PARAPHRASER}"
 
         echo "Paraphrasing completed at: $(date)"
 
+        IS_BIGRAM="False"
+        if [[ "${PARAPHRASER}" == *"bigram"* ]]; then
+            IS_BIGRAM="True"
+        fi
+
         # Run detection
-        local para_path="${gen_path}-pegasus-bigram=False-threshold=0.0"
+        local para_path="${gen_path}-${PARAPHRASER}-bigram=${IS_BIGRAM}-threshold=0.0"
         echo ""
         echo "=== DETECTION: ${mode} ==="
         echo "Input: ${para_path}"

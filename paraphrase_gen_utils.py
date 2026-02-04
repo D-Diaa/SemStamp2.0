@@ -12,74 +12,72 @@ stops = []
 
 # We slightly modify the Parrot class to make it more suitable for our use case
 class SParrot(Parrot):
-    def __init__(self, model_tag="prithivida/parrot_paraphraser_on_T5", use_gpu=False):
-        super().__init__(model_tag, use_gpu)
-    
-    def augment(self, input_phrase, use_gpu=False, diversity_ranker="levenshtein", do_diverse=False, max_return_phrases = 10, max_length=32, adequacy_threshold = 0.90, fluency_threshold = 0.90):
-      if use_gpu:
-        device= "cuda:0"
-      else:
-        device = "cpu"
+    def __init__(self, model_tag="prithivida/parrot_paraphraser_on_T5", use_gpu=True):
+        # Override parent __init__ to avoid deprecated use_auth_token parameter
+        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, GenerationConfig
+        from parrot.filters import Adequacy, Fluency, Diversity
 
-      self.model     = self.model.to(device)
+        self.device = "cuda" if (use_gpu and torch.cuda.is_available()) else "cpu"
+        self.tokenizer = AutoTokenizer.from_pretrained(model_tag)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_tag, use_safetensors=False).to(self.device)
+        self.adequacy_score = Adequacy()
+        self.fluency_score = Fluency()
+        self.diversity_score = Diversity()
 
-      import re
+        # Pre-create generation configs to avoid deprecation warnings
+        self._GenerationConfig = GenerationConfig
 
-      save_phrase = input_phrase
-      if len(input_phrase) >= max_length:
-         max_length += 32	
-			
-      input_phrase = re.sub('[^a-zA-Z0-9 \?\'\-\/\:\.]', '', input_phrase)
-      input_phrase = "paraphrase: " + input_phrase
-      input_ids = self.tokenizer.encode(input_phrase, return_tensors='pt')
-      input_ids = input_ids.to(device)
+    def augment(self, input_phrase, use_gpu=True, diversity_ranker="levenshtein", do_diverse=False,
+                max_return_phrases=10, max_length=32, adequacy_threshold=0.90, fluency_threshold=0.90):
+        if len(input_phrase) >= max_length:
+            max_length += 32
 
-      if do_diverse:
-        for n in range(2, 9):
-          if max_return_phrases % n == 0:
-            break 
-        #print("max_return_phrases - ", max_return_phrases , " and beam groups -", n)            
-        preds = self.model.generate(
-              input_ids,
-              do_sample=False, 
-              max_length=max_length, 
-              num_beams = max_return_phrases,
-              num_beam_groups = n,
-              diversity_penalty = 2.0,
-              early_stopping=True,
-              num_return_sequences=max_return_phrases)
-      else: 
-        preds = self.model.generate(
-                input_ids,
-                do_sample=True, 
-                max_length=max_length, 
-                top_k=50, 
-                top_p=0.95, 
+        cleaned_phrase = re.sub('[^a-zA-Z0-9 \?\'\-\/\:\.]', '', input_phrase)
+        prefixed_phrase = "paraphrase: " + cleaned_phrase
+        input_ids = self.tokenizer.encode(prefixed_phrase, return_tensors='pt').to(self.device)
+
+        if do_diverse:
+            # Find a valid number of beam groups
+            for n in range(2, 9):
+                if max_return_phrases % n == 0:
+                    break
+            gen_config = self._GenerationConfig(
+                do_sample=False,
+                max_length=max_length,
+                num_beams=max_return_phrases,
+                num_beam_groups=n,
+                diversity_penalty=2.0,
                 early_stopping=True,
-                num_return_sequences=max_return_phrases) 
-        
+                num_return_sequences=max_return_phrases,
+            )
+            preds = self.model.generate(input_ids, generation_config=gen_config, trust_remote_code=True)
+        else:
+            gen_config = self._GenerationConfig(
+                do_sample=True,
+                max_length=max_length,
+                top_k=50,
+                top_p=0.95,
+                early_stopping=True,
+                num_return_sequences=max_return_phrases,
+            )
+            preds = self.model.generate(input_ids, generation_config=gen_config)
 
-      paraphrases= set()
+        paraphrases = set()
+        for pred in preds:
+            gen_pp = self.tokenizer.decode(pred, skip_special_tokens=True).lower()
+            gen_pp = re.sub('[^a-zA-Z0-9 \?\'\-]', '', gen_pp)
+            paraphrases.add(gen_pp)
 
-      for pred in preds:
-        gen_pp = self.tokenizer.decode(pred, skip_special_tokens=True).lower()
-        gen_pp = re.sub('[^a-zA-Z0-9 \?\'\-]', '', gen_pp)
-        paraphrases.add(gen_pp)
+        adequacy_filtered_phrases = self.adequacy_score.filter(prefixed_phrase, paraphrases, adequacy_threshold, self.device)
+        if len(adequacy_filtered_phrases) == 0:
+            adequacy_filtered_phrases = paraphrases
+        fluency_filtered_phrases = self.fluency_score.filter(adequacy_filtered_phrases, fluency_threshold, self.device)
+        if len(fluency_filtered_phrases) == 0:
+            fluency_filtered_phrases = adequacy_filtered_phrases
+        diversity_scored_phrases = self.diversity_score.rank(input_phrase, fluency_filtered_phrases, diversity_ranker)
 
-
-      adequacy_filtered_phrases = self.adequacy_score.filter(input_phrase, paraphrases, adequacy_threshold, device )
-      if len(adequacy_filtered_phrases) == 0 :
-        adequacy_filtered_phrases = paraphrases
-      fluency_filtered_phrases = self.fluency_score.filter(adequacy_filtered_phrases, fluency_threshold, device )
-      if len(fluency_filtered_phrases) == 0 :
-          fluency_filtered_phrases = adequacy_filtered_phrases
-      diversity_scored_phrases = self.diversity_score.rank(input_phrase, fluency_filtered_phrases, diversity_ranker)
-      para_phrases = []
-      for para_phrase, diversity_score in diversity_scored_phrases.items():
-          para_phrases.append((para_phrase, diversity_score))
-      para_phrases.sort(key=lambda x:x[1], reverse=True)
-      para_phrases = [x[0] for x in para_phrases]
-      return para_phrases
+        para_phrases = sorted(diversity_scored_phrases.items(), key=lambda x: x[1], reverse=True)
+        return [phrase for phrase, score in para_phrases]
 
 
 def tokenize(tokenizer, text):

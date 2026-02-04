@@ -142,6 +142,8 @@ def parrot_paraphrase(parrot, texts, tokenizer, num_beams=10, bigram=False, save
         total_paraphrased.append(paraphrased)
         if bigram:
             para = accept_by_bigram_overlap(sent, paraphrased, tokenizer, bert_threshold=bert_threshold)
+        else:
+            para = paraphrased[0]
         paras.append(para)
     start_pos = 0
     output = []
@@ -210,7 +212,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_path', type=str, default='AbeHou/opt-1.3b-semstamp')
     parser.add_argument('--bsz', type=int, default=-1)
     parser.add_argument('--paraphraser', type=str,
-                        default="pegasus", choices=['pegasus', 
+                        default="parrot", choices=['pegasus', 
                                                     'parrot', 
                                                     'openai',
                                                     'parrot-bigram', 
