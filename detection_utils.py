@@ -86,6 +86,43 @@ def detect_lsh(sents, lsh_model, lmbd, lsh_dim, cutoff=None):
     # print(f"zscore: {zscore}")
     return zscore
 
+
+def detect_lsh_fixed(sents, lsh_model, lmbd, lsh_dim, secret_message):
+    """Detect watermark using fixed LSH seed from secret message."""
+    n_sent = len(sents)
+    n_watermark = 0
+    # Use secret message hash as the fixed seed for all sentences
+    fixed_lsh_seed = lsh_model.get_hash([secret_message])[0]
+    accept_mask = get_mask_from_seed(lsh_dim, lmbd, fixed_lsh_seed)
+    # Check all sentences (no prompt exclusion since seed is fixed)
+    for i in range(n_sent):
+        lsh_candidate = lsh_model.get_hash([sents[i]])[0]
+        if lsh_candidate in accept_mask:
+            n_watermark += 1
+    n_test_sent = n_sent
+    num = n_watermark - lmbd * n_test_sent
+    denom = np.sqrt(n_test_sent * lmbd * (1-lmbd))
+    zscore = num / denom
+    return zscore
+
+
+def detect_kmeans_fixed(sents, embedder, lmbd, k_dim, cluster_centers, secret_message):
+    """Detect watermark using fixed cluster ID from secret message."""
+    n_sent = len(sents)
+    n_watermark = 0
+    # Use secret message cluster ID as the fixed seed for all sentences
+    fixed_cluster_id = get_cluster_id(secret_message, embedder=embedder, cluster_centers=cluster_centers)
+    cluster_mask = get_cluster_mask(fixed_cluster_id, k_dim, lmbd)
+    # Check all sentences (no prompt exclusion since seed is fixed)
+    for i in range(n_sent):
+        curr_cluster_id = get_cluster_id(sents[i], embedder=embedder, cluster_centers=cluster_centers)
+        if curr_cluster_id in cluster_mask:
+            n_watermark += 1
+    n_test_sent = n_sent
+    num = n_watermark - lmbd * n_test_sent
+    denom = np.sqrt(n_test_sent * lmbd * (1-lmbd))
+    return num / denom
+
 def get_roc_metrics(labels, preds):
     fpr, tpr, _ = roc_curve(labels, preds)
     roc_auc = auc(fpr, tpr)

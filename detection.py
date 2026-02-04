@@ -11,13 +11,15 @@ from nltk.tokenize import sent_tokenize
 import os
 import torch
 import numpy as np
-from detection_utils import detect_kmeans, detect_lsh, run_bert_score, evaluate_z_scores, flatten_gens_and_paras
+from detection_utils import detect_kmeans, detect_lsh, detect_kmeans_fixed, detect_lsh_fixed, run_bert_score, evaluate_z_scores, flatten_gens_and_paras
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('dataset_path', help='hf dataset containing text and para_text columns')
     parser.add_argument('--human_text', help='hf dataset containing text column', default="data/c4-human")
-    parser.add_argument('--detection_mode', choices=['kmeans', 'lsh'], help='detection mode. lsh for semstamp and kmeans for k-semstamp')
+    parser.add_argument('--detection_mode', choices=['kmeans', 'lsh', 'kmeans_fixed', 'lsh_fixed'], help='detection mode. lsh for semstamp, kmeans for k-semstamp, lsh_fixed/kmeans_fixed for secret message modes')
+    parser.add_argument('--secret_message', type=str, help='Secret message for fixed modes (lsh_fixed, kmeans_fixed). Required for fixed modes.',
+                        default="The quick brown fox jumps over the lazy dog.")
     parser.add_argument('--cc_path', type=str, help='path to cluster centers')
     parser.add_argument('--embedder', type=str, help='sentence embedder', default="AbeHou/SemStamp-c4-sbert")
     parser.add_argument('--model', type=str, help='backbone LM for text generation', default='meta-llama/Llama-3.1-8B')
@@ -78,6 +80,52 @@ if __name__ == '__main__':
             sents = sent_tokenize(human_texts[i])
             z_score = detect_lsh(sents=sents, lsh_model=lsh_model,
                                  lmbd=args.lmbd, lsh_dim=args.sp_dim)
+            human_scores.append(z_score)
+
+    # semstamp fixed detection (secret message based)
+    elif args.detection_mode == 'lsh_fixed':
+        if args.secret_message is None:
+            raise ValueError("--secret_message is required for lsh_fixed mode")
+        lsh_model = SBERTLSHModel(
+            lsh_model_path=args.embedder, device='cuda', batch_size=1, lsh_dim=args.sp_dim, sbert_type='base')
+        for i in trange(0, len(gens), 1, desc='lsh_fixed_detection'):
+            text_sents = gens[i] if type(gens[i]) == list else sent_tokenize(gens[i])
+            if paras != None:
+                para_sents = paras[i] if type(paras[i]) == list else sent_tokenize(paras[i])
+            z_score = detect_lsh_fixed(sents=text_sents, lsh_model=lsh_model,
+                                       lmbd=args.lmbd, lsh_dim=args.sp_dim, secret_message=args.secret_message)
+            para_z_score = detect_lsh_fixed(
+                sents=para_sents, lsh_model=lsh_model, lmbd=args.lmbd, lsh_dim=args.sp_dim, secret_message=args.secret_message)
+            z_scores.append(z_score)
+            para_scores.append(para_z_score)
+
+        for i in trange(0, len(human_texts), 1, desc='lsh_fixed_human'):
+            sents = sent_tokenize(human_texts[i])
+            z_score = detect_lsh_fixed(sents=sents, lsh_model=lsh_model,
+                                       lmbd=args.lmbd, lsh_dim=args.sp_dim, secret_message=args.secret_message)
+            human_scores.append(z_score)
+
+    # ksemstamp fixed detection (secret message based)
+    elif args.detection_mode == 'kmeans_fixed':
+        if args.secret_message is None:
+            raise ValueError("--secret_message is required for kmeans_fixed mode")
+        cluster_centers = torch.load(args.cc_path)
+        embedder = SentenceTransformer(args.embedder)
+        for i in trange(0, len(gens), 1, desc='kmeans_fixed_detection'):
+            gen_sents = gens[i] if type(gens[i]) == list else sent_tokenize(gens[i])
+            if paras != None:
+                para_sents = paras[i] if type(paras[i]) == list else sent_tokenize(paras[i])
+            z_score = detect_kmeans_fixed(sents=gen_sents, embedder=embedder, lmbd=args.lmbd,
+                                          k_dim=args.sp_dim, cluster_centers=cluster_centers, secret_message=args.secret_message)
+            para_score = detect_kmeans_fixed(
+                sents=para_sents, embedder=embedder, lmbd=args.lmbd, k_dim=args.sp_dim, cluster_centers=cluster_centers, secret_message=args.secret_message)
+            z_scores.append(z_score)
+            para_scores.append(para_score)
+
+        for i in trange(0, len(human_texts), 1, desc='kmeans_fixed_human'):
+            sents = sent_tokenize(human_texts[i])
+            z_score = detect_kmeans_fixed(sents=sents, embedder=embedder, lmbd=args.lmbd,
+                                          k_dim=args.sp_dim, cluster_centers=cluster_centers, secret_message=args.secret_message)
             human_scores.append(z_score)
     print("Saving scores...")
     print(f"Average z-score of generations: {np.mean(z_scores):.3f}")

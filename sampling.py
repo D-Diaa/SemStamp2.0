@@ -36,8 +36,10 @@ def parse_args():
                         help='Ratio of valid sentences.')
     parser.add_argument('--delta', type=float, default=0,
                         help='Logit augmentation for baseline or margin size for LSH and KMeans.')
-    parser.add_argument('--sp_mode', type=str, choices=['lsh', 'kmeans'],
-                        help='Spatial mode for generation (lsh or kmeans).', default=None)
+    parser.add_argument('--sp_mode', type=str, choices=['lsh', 'kmeans', 'lsh_fixed', 'kmeans_fixed'],
+                        help='Spatial mode for generation (lsh, kmeans, lsh_fixed, or kmeans_fixed).', default=None)
+    parser.add_argument('--secret_message', type=str, default="The quick brown fox jumps over the lazy dog.",
+                        help='Secret message for fixed modes (lsh_fixed, kmeans_fixed). Required for fixed modes.')
     parser.add_argument('--sp_dim', type=int, default=8,
                         help='Number of partitions in the embedding space. Default is 8.')
     parser.add_argument('--embed_path', type=str,
@@ -57,6 +59,13 @@ def worker(rank, dataset_chunk, output_queue, args, device):
     """
     Worker function to process a dataset chunk on a single GPU.
     """
+    sampler = BatchedRejectionSampler(
+        model_path=args.model,
+        device=device,
+        batch_size=getattr(args, 'batch_size', 16),
+        max_batches=getattr(args, 'max_batches', 8),
+        dtype=torch.bfloat16,
+    )
     gen_config = GenerationConfig(
         max_new_tokens=args.max_new_tokens,
         min_new_tokens=args.min_new_tokens,
@@ -68,14 +77,6 @@ def worker(rank, dataset_chunk, output_queue, args, device):
         pad_token_id=sampler.tokenizer.pad_token_id,
     )
     if args.sp_mode == "lsh":
-        # Use BatchedRejectionSampler for LSH mode
-        sampler = BatchedRejectionSampler(
-            model_path=args.model,
-            device=device,
-            batch_size=getattr(args, 'batch_size', 16),
-            max_batches=getattr(args, 'max_batches', 8),
-            dtype=torch.bfloat16,
-        )
 
         lsh_model = SBERTLSHModel(
             lsh_model_path=args.embedder, device=device, batch_size=1, lsh_dim=args.sp_dim, sbert_type='base'
@@ -127,14 +128,6 @@ def worker(rank, dataset_chunk, output_queue, args, device):
             return ex
 
     elif args.sp_mode == "kmeans":
-        # Use BatchedRejectionSampler for kmeans mode
-        sampler = BatchedRejectionSampler(
-            model_path=args.model,
-            device=device,
-            batch_size=getattr(args, 'batch_size', 16),
-            max_batches=getattr(args, 'max_batches', 8),
-            dtype=torch.bfloat16,
-        )
 
         cluster_centers = torch.load(args.cc_path)
         embedder = SentenceTransformer(args.embedder, device=device)
@@ -181,6 +174,99 @@ def worker(rank, dataset_chunk, output_queue, args, device):
             print(f"response: {response}")
             ex['text'] = response.strip()
             return ex
+
+    elif args.sp_mode == "lsh_fixed":
+        if args.secret_message is None:
+            raise ValueError("--secret_message is required for lsh_fixed mode")
+
+        lsh_model = SBERTLSHModel(
+            lsh_model_path=args.embedder, device=device, batch_size=1, lsh_dim=args.sp_dim, sbert_type='base'
+        )
+
+        # Get fixed seed from secret message using the same hashing as normal LSH
+        fixed_lsh_seed = lsh_model.get_hash([args.secret_message])[0]
+
+        def create_lsh_fixed_acceptance_fn(lsh_model, lsh_dim, lmbd, margin, fixed_lsh_seed):
+            """Create an LSH fixed acceptance function using secret message seed."""
+            accept_mask = get_mask_from_seed(lsh_dim, lmbd, fixed_lsh_seed)
+
+            def acceptance_fn(context: str, candidate: str) -> bool:
+                # Check margin condition (reject if too close to hyperplanes)
+                accepted_text, _ = reject_close_generation(
+                    lsh_model, [candidate], margin=margin, cutoff=None
+                )
+                if len(accepted_text) == 0:
+                    return False
+
+                # Check if candidate's hash is in the fixed accept mask
+                candidate_hash = lsh_model.get_hash([candidate])[0]
+                return candidate_hash in accept_mask
+
+            return acceptance_fn
+
+        def text_to_generated_text(ex):
+            prompt = extract_prompt_from_text(ex['text'], args.len_prompt)
+            print(f"prompt: {prompt}")
+
+            acceptance_fn = create_lsh_fixed_acceptance_fn(
+                lsh_model, args.sp_dim, args.lmbd, args.delta, fixed_lsh_seed
+            )
+
+            response = sampler.generate_continuation(
+                prompt=prompt,
+                gen_config=gen_config,
+                acceptance_fn=acceptance_fn,
+                max_tokens=args.max_new_tokens,
+            )
+            print(f"response: {response}")
+            ex['text'] = response.strip()
+            return ex
+
+    elif args.sp_mode == "kmeans_fixed":
+        if args.secret_message is None:
+            raise ValueError("--secret_message is required for kmeans_fixed mode")
+
+        cluster_centers = torch.load(args.cc_path)
+        embedder = SentenceTransformer(args.embedder, device=device)
+
+        # Get fixed cluster ID from secret message using the same method as normal kmeans
+        fixed_cluster_id = get_cluster_id(args.secret_message, cluster_centers, embedder)
+
+        def create_kmeans_fixed_acceptance_fn(embedder, cluster_centers, k_dim, lmbd, margin, fixed_cluster_id):
+            """Create a kmeans fixed acceptance function using secret message seed."""
+            accept_mask = get_cluster_mask(fixed_cluster_id, k_dim, lmbd)
+
+            def acceptance_fn(context: str, candidate: str) -> bool:
+                # Check margin condition (reject if too close to cluster boundary)
+                accepted_text, candidate_cluster_id = kmeans_reject_overlap(
+                    text=candidate, embedder=embedder, cluster_centers=cluster_centers, margin=margin
+                )
+                if accepted_text is None:
+                    return False
+
+                # Check if candidate's cluster ID is in the fixed accept mask
+                return candidate_cluster_id in accept_mask
+
+            return acceptance_fn
+
+        def text_to_generated_text(ex):
+            prompt = extract_prompt_from_text(ex['text'], args.len_prompt)
+            print(f"prompt: {prompt}")
+
+            acceptance_fn = create_kmeans_fixed_acceptance_fn(
+                embedder, cluster_centers, args.sp_dim, args.lmbd, args.delta, fixed_cluster_id
+            )
+
+            response = sampler.generate_continuation(
+                prompt=prompt,
+                gen_config=gen_config,
+                acceptance_fn=acceptance_fn,
+                max_tokens=args.max_new_tokens,
+            )
+            print(f"response: {response}")
+            ex['text'] = response.strip()
+            return ex
+
     else:
         raise NotImplementedError
 
