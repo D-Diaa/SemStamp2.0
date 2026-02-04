@@ -3,3 +3,4 @@ models/*
 semstamp-data/*
 __pycache__/*
 CLAUDE.md
+figures/*
