@@ -17,7 +17,7 @@ def parse_args():
     parser.add_argument('--human_text', help='hf dataset containing text column', default="data/c4-human")
     parser.add_argument('--detection_mode', choices=['kmeans', 'lsh', 'kmeans_fixed', 'lsh_fixed'],
                         help='detection mode. lsh for semstamp, kmeans for k-semstamp, lsh_fixed/kmeans_fixed for secret message modes')
-    parser.add_argument('--secret_message', type=str, default="The quick brown fox jumps over the lazy dog.",
+    parser.add_argument('--secret_message', type=str, default="The magic words are squeamish ossifrage.",
                         help='Secret message for fixed modes (lsh_fixed, kmeans_fixed).')
     parser.add_argument('--cc_path', type=str, help='path to cluster centers')
     parser.add_argument('--embedder', type=str, default="AbeHou/SemStamp-c4-sbert", help='sentence embedder')
@@ -109,6 +109,11 @@ if __name__ == '__main__':
     z_scores = run_detection(detect_fn, gens, f'{mode_desc}_detection')
     para_scores = run_detection(detect_fn, paras, f'{mode_desc}_para') if paras else []
     human_scores = run_detection(detect_fn, human_texts, f'{mode_desc}_human')
+
+    # print first 5 z-scores
+    print("First 5 z-scores of generated texts:", z_scores[:5])
+    print("First 5 z-scores of paraphrased texts:", para_scores[:5] if para_scores else "N/A")
+    print("First 5 z-scores of human texts:", human_scores[:5])
 
     # Save results
     save_results(args, z_scores, para_scores, human_scores, gens, paras)

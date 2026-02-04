@@ -39,7 +39,7 @@ def parse_args():
                         help='Logit augmentation for baseline or margin size for LSH and KMeans.')
     parser.add_argument('--sp_mode', type=str, choices=['lsh', 'kmeans', 'lsh_fixed', 'kmeans_fixed'],
                         help='Spatial mode for generation (lsh, kmeans, lsh_fixed, or kmeans_fixed).', default=None)
-    parser.add_argument('--secret_message', type=str, default="The quick brown fox jumps over the lazy dog.",
+    parser.add_argument('--secret_message', type=str, default="The magic words are squeamish ossifrage.",
                         help='Secret message for fixed modes (lsh_fixed, kmeans_fixed). Required for fixed modes.')
     parser.add_argument('--sp_dim', type=int, default=8,
                         help='Number of partitions in the embedding space. Default is 8.')
@@ -159,22 +159,30 @@ def worker(rank, dataset_chunk, output_queue, args, device):
     else:
         raise NotImplementedError(f"Unknown sp_mode: {args.sp_mode}")
 
+    # Track acceptance statistics
+    total_accepted = 0
+    total_sentences = 0
+
     def text_to_generated_text(ex):
+        nonlocal total_accepted, total_sentences
         prompt = extract_prompt_from_text(ex['text'], args.len_prompt)
         print(f"prompt: {prompt}")
 
-        response = sampler.generate_continuation(
+        response, accepted_count, sentence_count = sampler.generate_continuation(
             prompt=prompt,
             gen_config=gen_config,
             acceptance_fn=get_acceptance_fn(),
             max_tokens=args.max_new_tokens,
         )
+        total_accepted += accepted_count
+        total_sentences += sentence_count
         print(f"response: {response}")
+        print(f"[GPU {rank}] Accepted {accepted_count}/{sentence_count} sentences")
         ex['text'] = response.strip()
         return ex
 
     processed_chunk = dataset_chunk.map(text_to_generated_text, batch_size=1)
-    output_queue.put(processed_chunk)
+    output_queue.put((processed_chunk, total_accepted, total_sentences))
 
 
 def parallel_generate(args):
@@ -197,8 +205,13 @@ def parallel_generate(args):
         processes.append(p)
 
     all_results = []
+    total_accepted = 0
+    total_sentences = 0
     for _ in processes:
-        all_results.append(output_queue.get())
+        chunk, accepted, sentences = output_queue.get()
+        all_results.append(chunk)
+        total_accepted += accepted
+        total_sentences += sentences
 
     for p in processes:
         p.join()
@@ -207,6 +220,16 @@ def parallel_generate(args):
     output_path = os.path.join(args.data, f"{args.sp_mode}-generated")
     os.makedirs(output_path, exist_ok=True)
     merged_dataset.save_to_disk(output_path)
+
+    # Report acceptance statistics
+    acceptance_rate = (total_accepted / total_sentences * 100) if total_sentences > 0 else 0
+    print("\n" + "=" * 60)
+    print("GENERATION STATISTICS")
+    print("=" * 60)
+    print(f"Total sentences generated: {total_sentences}")
+    print(f"Sentences accepted by watermark criterion: {total_accepted}")
+    print(f"Acceptance rate: {acceptance_rate:.2f}%")
+    print("=" * 60)
 
 
 if __name__ == '__main__':

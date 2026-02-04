@@ -240,7 +240,7 @@ class BatchedRejectionSampler:
         acceptance_fn: Callable[[str, str], bool],
         max_sentences: Optional[int] = None,
         max_tokens: Optional[int] = None,
-    ) -> str:
+    ) -> Tuple[str, int, int]:
         """
         Generate a multi-sentence continuation using iterative rejection sampling.
 
@@ -257,7 +257,10 @@ class BatchedRejectionSampler:
             max_tokens: Maximum number of new tokens to generate (default: uses gen_config).
 
         Returns:
-            The full generated text (prompt + all generated sentences).
+            A tuple of (text, accepted_count, total_count) where:
+                - text: The full generated text (prompt + all generated sentences).
+                - accepted_count: Number of sentences that passed the acceptance criterion.
+                - total_count: Total number of sentences generated.
         """
         text = prompt
         text_ids = self.tokenizer.encode(prompt, return_tensors='pt').to(self.device)
@@ -265,6 +268,7 @@ class BatchedRejectionSampler:
 
         max_new_tokens = max_tokens if max_tokens else (gen_config.max_new_tokens or 256)
         sentence_count = 0
+        accepted_count = 0
 
         while True:
             # Create a context-aware acceptance function
@@ -287,6 +291,8 @@ class BatchedRejectionSampler:
             # Append the new sentence
             text += new_sentence
             sentence_count += 1
+            if accepted:
+                accepted_count += 1
 
             # Re-encode to check token count
             text_ids = self.tokenizer.encode(text, return_tensors='pt').to(self.device)
@@ -299,7 +305,7 @@ class BatchedRejectionSampler:
             if current_new_tokens >= max_new_tokens:
                 break
 
-        return text
+        return text, accepted_count, sentence_count
 
 
 def create_sampler(
@@ -435,13 +441,14 @@ def main():
         overlap_ratio = overlap / len(candidate_words)
         return overlap_ratio < 0.25
 
-    full_text = sampler.generate_continuation(
+    full_text, accepted_count, total_count = sampler.generate_continuation(
         args.prompt,
         gen_config,
         context_aware_accept,
         max_sentences=3,
     )
     print(f"Full text:\n{full_text}")
+    print(f"Accepted: {accepted_count}/{total_count} sentences")
 
     # Example 4: Accept only sentences containing specific punctuation/structure
     print("\n" + "=" * 60)
