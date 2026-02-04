@@ -3,21 +3,16 @@ import os
 from datasets import load_from_disk
 import torch
 import torch.multiprocessing as mp
-from transformers import GenerationConfig
-from transformers.modeling_utils import PreTrainedModel
-from transformers.tokenization_utils import PreTrainedTokenizer
 from sentence_transformers import SentenceTransformer
 import numpy as np
-from transformers import StoppingCriteriaList
-from collections import defaultdict
 import pickle
-from tqdm import trange, tqdm
+from tqdm import tqdm
 from kmeans_pytorch import *  # maybe faiss
 import sampling_utils
-from sampling_utils import SentenceEndCriteria, gen_sent
 
-rng = sampling_utils.rng
-MAX_TRIALS = sampling_utils.MAX_TRIALS
+device = "cuda" if torch.cuda.is_available() else "cpu"
+rng = torch.Generator(device)
+
 hash_key = sampling_utils.hash_key
 
 def kmeans_predict(
@@ -65,7 +60,7 @@ def worker(rank, text_chunk, embedder_path, queue, encode_batch_size):
     """
     Worker function to process a text chunk and generate embeddings on a specific GPU.
     """
-    device = f'cuda:{rank}'
+    device = f'cuda:{rank}' if torch.cuda.is_available() else 'cpu'
     embedder = SentenceTransformer(embedder_path, device=device)
     embedder = embedder.eval()
 
@@ -81,7 +76,6 @@ def worker(rank, text_chunk, embedder_path, queue, encode_batch_size):
 
     # Put all embeddings into the queue
     queue.put(sent_embeds)
-
 
 def embed_gen_list(dataset_path, embedder_path, encode_batch_size=32, num_gpus=torch.cuda.device_count()):
     """
@@ -131,14 +125,14 @@ def embed_gen_list(dataset_path, embedder_path, encode_batch_size=32, num_gpus=t
 def get_cluster_mask(curr_cluster_id, k_dim, lmbd):
     rng.manual_seed(curr_cluster_id.item() * hash_key)
     num_accept = int(k_dim * lmbd)
-    mask = torch.randperm(k_dim, device='cuda', generator=rng)[:num_accept]
-    return mask.to('cuda')
+    mask = torch.randperm(k_dim, device=device, generator=rng)[:num_accept]
+    return mask.to(device)
 
 def kmeans_reject_overlap(text, embedder, cluster_centers, margin=0.01):
     gen_embed = embedder.encode(text, convert_to_tensor=True)
     gen_embed = gen_embed.reshape(1, -1)
     cluster_centers = torch.tensor(np.array(cluster_centers))
-    dis = pairwise_cosine(gen_embed, cluster_centers, device='cuda')
+    dis = pairwise_cosine(gen_embed, cluster_centers, device=device)
 
     # each row of ranking corresponds to the cluster distance closeness of a generation
     ranked_dis = torch.argsort(dis, dim=-1)
@@ -156,7 +150,6 @@ def kmeans_reject_overlap(text, embedder, cluster_centers, margin=0.01):
     else:
         return None, closest.clone().detach()
 
-
 def get_cluster_id(text, cluster_centers, embedder):
     embedding = embedder.encode(text, convert_to_tensor=True)
     embedding = embedding.reshape(1, -1)
@@ -165,87 +158,9 @@ def get_cluster_id(text, cluster_centers, embedder):
         embedding,
         cluster_centers=cluster_centers,
         distance='cosine',
-        device='cuda'
+        device=device
     )
     return cluster_id
-
-
-def kmeans_reject_completion(
-        prompt: str,
-        model: PreTrainedModel, tokenizer: PreTrainedTokenizer, gen_config: GenerationConfig,  # gen args
-        embedder: SentenceTransformer,
-        lmbd: float,
-        cluster_centers: torch.Tensor,
-        # LSH args # watermark args. lambda is probability of accepting (i.e., green list size)
-        k_dim: int,
-        device='cuda',
-        margin=0.01,
-        **kwargs):
-
-    sent_end_criteria = SentenceEndCriteria(tokenizer)
-    curr_cluster_id = get_cluster_id(prompt, cluster_centers, embedder)
-    mask = get_cluster_mask(curr_cluster_id, k_dim, lmbd)
-
-    text = prompt
-    new_text = prompt
-    text_ids = tokenizer.encode(prompt, return_tensors='pt').to(device)
-    prompt_length = len(text_ids[0])
-    sent_end_criteria.update(new_text)
-
-    total_trials = 0
-    success_trials = 0  # also include trials that maxed out MAX_TRIALS
-    current_trials = 0
-    maxedout_trials = 0
-    debug_text_segments = [(prompt, text_ids.size(1), curr_cluster_id)]
-    cluster_id_sequence = [curr_cluster_id.item()]
-    
-    while True:
-        # input_ids = tokenizer.encode(last_step_text, return_tensors='pt').to(device)
-        stopping_criteria = StoppingCriteriaList([sent_end_criteria])
-        new_text, new_text_ids = gen_sent(model = model, 
-                tokenizer = tokenizer, 
-                text_ids = text_ids,
-                gen_config = gen_config,
-                stopping_criteria = stopping_criteria
-            )
-        # print(f'NEW TEXT: {new_text}')
-        if new_text == '':
-            print('WARNING: stopped generation because generated nothing (after discarding last generated token)', flush=True)
-            break
-
-        total_trials += 1
-        current_trials += 1
-
-        accepted_text, curr_cluster_id = kmeans_reject_overlap(text=new_text, embedder=embedder, cluster_centers=cluster_centers, margin=margin)
-
-        if (accepted_text == None and current_trials < MAX_TRIALS):
-            continue
-        else:
-            new_text = accepted_text if accepted_text != None else new_text
-        cluster_id_sequence.append(curr_cluster_id.item())
-        if (curr_cluster_id in mask) or current_trials >= MAX_TRIALS:
-            if current_trials >= MAX_TRIALS:
-                print(
-                    f'WARNING: desired semantic signature can\'t be sampled after max_trials {MAX_TRIALS}', flush=True)
-                print(f"cluster_id_sequence: {cluster_id_sequence}")
-                print(
-                    f"cluster_ids_counter: {torch.bincount(torch.tensor(cluster_id_sequence))}")
-                print(f'CONTEXT: {text}', flush=True)
-                print(
-                    f'NOTE: use regular (non-filtered-by-sig) continuation: {new_text}', flush=True)
-                maxedout_trials += 1
-            debug_text_segments.append(
-                (new_text, new_text_ids.size(1) - text_ids.size(1), curr_cluster_id))
-            current_trials = 0
-            success_trials += 1
-            mask = get_cluster_mask(curr_cluster_id, k_dim, lmbd)
-            text += new_text
-            text_ids = new_text_ids
-            sent_end_criteria.update(text)
-            if (len(text_ids[0]) - prompt_length) >= gen_config.max_new_tokens-1:
-                break
-    return text
-
 
 def pairwise_cosine(data1, data2, device=torch.device('cpu')):
     # transfer to device
@@ -274,7 +189,7 @@ def get_cluster_centers(embeds, k_dim, gamma=0.002):
         embeds,
         num_clusters=k_dim,
         distance='cosine',
-        device='cuda'
+        device=device
     )
     return cluster_ids, cluster_centers
 
@@ -283,7 +198,7 @@ def load_embeds(embed_path):
         d = pickle.load(f)
     # move all embeddings to the same device
     for i in range(len(d['text'])):
-        d['text'][i] = d['text'][i].to('cuda')
+        d['text'][i] = d['text'][i].to(device)
     gen_embeds = torch.stack(d['text']).squeeze()
     return gen_embeds
 

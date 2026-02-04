@@ -1,19 +1,18 @@
 import pprint
 import argparse
 import os
-import sys
 import torch.multiprocessing as mp
 from datasets import load_from_disk, Dataset
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from transformers import GenerationConfig
 from sbert_lsh_model import SBERTLSHModel
 from sentence_transformers import SentenceTransformer
 from multiprocessing import Process, Queue
-import numpy as np
 from nltk.tokenize import sent_tokenize
 from sampling_utils import extract_prompt_from_text
-from sampling_lsh_utils import lsh_reject_completion
-from sampling_kmeans_utils import kmeans_reject_completion, load_embeds
+from sampling_lsh_utils import get_mask_from_seed, reject_close_generation
+from sampling_kmeans_utils import get_cluster_mask, kmeans_reject_overlap, get_cluster_id
+from batched_rejection_sampler import BatchedRejectionSampler
 
 PUNCTS = '.,!?'
 
@@ -22,9 +21,9 @@ def parse_args():
     parser.add_argument(
         'data', type=str, help='Path to Hugging Face dataset that has a column "text".')
     parser.add_argument(
-        '--model', type=str, help='Model name to generate continuation. HuggingFace/OpenAI.', default="facebook/opt-1.3b")
+        '--model', type=str, help='Model name to generate continuation. HuggingFace/OpenAI.', default="meta-llama/Llama-3.1-8B")
     parser.add_argument(
-        '--embedder', type=str, help='Model name to embed sentences.', default=None)
+        '--embedder', type=str, help='Model name to embed sentences.', default="AbeHou/SemStamp-c4-sbert")
     parser.add_argument('--len_prompt', '-l', type=int, default=32,
                         help='MAX length of prompt.')
     parser.add_argument('--max_new_tokens', type=int, default=205,
@@ -45,6 +44,10 @@ def parse_args():
                         help='Path to precomputed embed for training KMeans.', default=None)
     parser.add_argument('--cc_path', type=str,
                         help='KMeans precomputed cluster centers data.', default=None)
+    parser.add_argument('--batch_size', type=int, default=16,
+                        help='Number of candidate sentences per batch for batched rejection sampling.')
+    parser.add_argument('--max_batches', type=int, default=8,
+                        help='Maximum number of batches to try before accepting any sample.')
     pp = pprint.PrettyPrinter(indent=4)
     args = parser.parse_args()
     pp.pprint(vars(args))  # Debug print for parsed arguments
@@ -54,46 +57,128 @@ def worker(rank, dataset_chunk, output_queue, args, device):
     """
     Worker function to process a dataset chunk on a single GPU.
     """
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, use_safetensors=False)
-    model.to(device)
-    model.eval()
-
     gen_config = GenerationConfig(
         max_new_tokens=args.max_new_tokens,
         min_new_tokens=args.min_new_tokens,
         do_sample=True,
-        temperature=0.7,
-        top_k=0,
-        repetition_penalty=args.rep_p,
+        temperature=getattr(args, 'temperature', 1.0),
+        top_k=getattr(args, 'top_k', 50),
+        top_p=getattr(args, 'top_p', 1.0),
+        repetition_penalty=getattr(args, 'rep_p', 1.0),
+        pad_token_id=sampler.tokenizer.pad_token_id,
     )
-
     if args.sp_mode == "lsh":
+        # Use BatchedRejectionSampler for LSH mode
+        sampler = BatchedRejectionSampler(
+            model_path=args.model,
+            device=device,
+            batch_size=getattr(args, 'batch_size', 16),
+            max_batches=getattr(args, 'max_batches', 8),
+            dtype=torch.bfloat16,
+        )
+
         lsh_model = SBERTLSHModel(
             lsh_model_path=args.embedder, device=device, batch_size=1, lsh_dim=args.sp_dim, sbert_type='base'
         )
 
+        def create_lsh_acceptance_fn(lsh_model, lsh_dim, lmbd, margin):
+            """Create an LSH acceptance function for the batched sampler."""
+            def acceptance_fn(context: str, candidate: str) -> bool:
+                # Get the last sentence from context to determine seed
+                sentences = sent_tokenize(context)
+                if sentences:
+                    last_sentence = sentences[-1]
+                    lsh_seed = lsh_model.get_hash([last_sentence])[0]
+                else:
+                    # Use prompt hash as seed
+                    lsh_seed = lsh_model.get_hash([context])[0]
+
+                accept_mask = get_mask_from_seed(lsh_dim, lmbd, lsh_seed)
+
+                # Check margin condition (reject if too close to hyperplanes)
+                accepted_text, _ = reject_close_generation(
+                    lsh_model, [candidate], margin=margin, cutoff=None
+                )
+                if len(accepted_text) == 0:
+                    return False
+
+                # Check if candidate's hash is in accept mask
+                candidate_hash = lsh_model.get_hash([candidate])[0]
+                return candidate_hash in accept_mask
+
+            return acceptance_fn
+
         def text_to_generated_text(ex):
             prompt = extract_prompt_from_text(ex['text'], args.len_prompt)
-            response = lsh_reject_completion(
-                prompt, model, tokenizer, gen_config, lsh_model, args.sp_dim,
-                lmbd=args.lmbd, device=device, margin=args.delta
+            print(f"prompt: {prompt}")
+
+            acceptance_fn = create_lsh_acceptance_fn(
+                lsh_model, args.sp_dim, args.lmbd, args.delta
             )
+
+            response = sampler.generate_continuation(
+                prompt=prompt,
+                gen_config=gen_config,
+                acceptance_fn=acceptance_fn,
+                max_tokens=args.max_new_tokens,
+            )
+            print(f"response: {response}")
             ex['text'] = response.strip()
             return ex
 
     elif args.sp_mode == "kmeans":
-        cluster_centers = torch.load(args.cc_path)
-        # print(f"Load cluster centers: {cluster_centers.shape}")
+        # Use BatchedRejectionSampler for kmeans mode
+        sampler = BatchedRejectionSampler(
+            model_path=args.model,
+            device=device,
+            batch_size=getattr(args, 'batch_size', 16),
+            max_batches=getattr(args, 'max_batches', 8),
+            dtype=torch.bfloat16,
+        )
 
+        cluster_centers = torch.load(args.cc_path)
         embedder = SentenceTransformer(args.embedder, device=device)
+
+        def create_kmeans_acceptance_fn(embedder, cluster_centers, k_dim, lmbd, margin):
+            """Create a kmeans acceptance function for the batched sampler."""
+            def acceptance_fn(context: str, candidate: str) -> bool:
+                # Get the last sentence from context to determine cluster seed
+                sentences = sent_tokenize(context)
+                if sentences:
+                    last_sentence = sentences[-1]
+                    curr_cluster_id = get_cluster_id(last_sentence, cluster_centers, embedder)
+                else:
+                    curr_cluster_id = get_cluster_id(context, cluster_centers, embedder)
+
+                accept_mask = get_cluster_mask(curr_cluster_id, k_dim, lmbd)
+
+                # Check margin condition (reject if too close to cluster boundary)
+                accepted_text, candidate_cluster_id = kmeans_reject_overlap(
+                    text=candidate, embedder=embedder, cluster_centers=cluster_centers, margin=margin
+                )
+                if accepted_text is None:
+                    return False
+
+                # Check if candidate's cluster ID is in accept mask
+                return candidate_cluster_id in accept_mask
+
+            return acceptance_fn
 
         def text_to_generated_text(ex):
             prompt = extract_prompt_from_text(ex['text'], args.len_prompt)
-            response = kmeans_reject_completion(
-                prompt=prompt, model=model, tokenizer=tokenizer,gen_config=gen_config, embedder=embedder,
-                cluster_centers=cluster_centers, lmbd=args.lmbd, k_dim=args.sp_dim, margin=args.delta, device=device
+            print(f"prompt: {prompt}")
+
+            acceptance_fn = create_kmeans_acceptance_fn(
+                embedder, cluster_centers, args.sp_dim, args.lmbd, args.delta
             )
+
+            response = sampler.generate_continuation(
+                prompt=prompt,
+                gen_config=gen_config,
+                acceptance_fn=acceptance_fn,
+                max_tokens=args.max_new_tokens,
+            )
+            print(f"response: {response}")
             ex['text'] = response.strip()
             return ex
     else:
