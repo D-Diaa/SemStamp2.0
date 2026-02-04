@@ -15,6 +15,11 @@ rng = torch.Generator(device)
 def run_bert_score(gen_sents, para_sents, max_len=450, batch_size=32):
     if not gen_sents or not para_sents:
         return 0.0
+    # Filter out empty strings to avoid bert_score tokenizer errors
+    filtered = [(g, p) for g, p in zip(gen_sents, para_sents) if g.strip() and p.strip()]
+    if not filtered:
+        return 0.0
+    gen_sents, para_sents = zip(*filtered)
     P, R, F1 = bert_score_func(
         gen_sents, para_sents,
         model_type="roberta-large",
@@ -128,16 +133,11 @@ def get_roc_metrics_from_zscores(m, mp, h, dataset_path):
 def evaluate_z_scores(mz, mpz, hz, dataset_path):
     mz = np.array(mz)
     mpz = np.array(mpz)
-    hz = np.array(hz)
-    fpr_5_threshold = 0
-    fpr_1_threshold = 0
-    for z_threshold in np.arange(0, 6, 0.005):
-        fp = len(hz[hz > z_threshold]) / len(hz)
-        if (fp >= 0.0095 and fp <= 0.0104):
-            fpr_1_threshold = z_threshold
-        elif (fp >= 0.045 and fp <= 0.054):
-            fpr_5_threshold = z_threshold
+    hz = np.nan_to_num(np.array(hz))
+    # Use quantiles from human z-scores to find thresholds
+    # 99th percentile -> 1% of human texts above this threshold (FPR=1%)
+    # 95th percentile -> 5% of human texts above this threshold (FPR=5%)
+    fpr_1_threshold = np.percentile(hz, 99)
+    fpr_5_threshold = np.percentile(hz, 95)
     mp_area, mp_fpr = get_roc_metrics_from_zscores(mz, mpz, hz, dataset_path)
-    if fpr_1_threshold == 0:
-        fpr_1_threshold = 2.33  # according to standard z-score table
     return mp_area, len(mpz[mpz > fpr_1_threshold]) / len(mpz), len(mpz[mpz > fpr_5_threshold]) / len(mpz)
