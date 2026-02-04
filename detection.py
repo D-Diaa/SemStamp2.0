@@ -1,5 +1,5 @@
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer
 # from eval_clm import get_roc_metrics
 import pandas as pd
 from sbert_lsh_model import SBERTLSHModel
@@ -19,8 +19,8 @@ def parse_args():
     parser.add_argument('--human_text', help='hf dataset containing text column', default="data/c4-human")
     parser.add_argument('--detection_mode', choices=['kmeans', 'lsh'], help='detection mode. lsh for semstamp and kmeans for k-semstamp')
     parser.add_argument('--cc_path', type=str, help='path to cluster centers')
-    parser.add_argument('--embedder', type=str, help='sentence embedder')
-    parser.add_argument('--model', type=str, help='backbone LM for text generation', default='facebook/opt-1.3b')
+    parser.add_argument('--embedder', type=str, help='sentence embedder', default="AbeHou/SemStamp-c4-sbert")
+    parser.add_argument('--model', type=str, help='backbone LM for text generation', default='meta-llama/Llama-3.1-8B')
     parser.add_argument('--sp_dim', type=int, default=3, help='dimension of the subspaces. default 3 for sstamp and 8 for ksstamp')
     parser.add_argument('--max_new_tokens', type=int, default=205)
     parser.add_argument('--lmbd', type=float, default=0.25, help='ratio of valid sentences')
@@ -79,7 +79,10 @@ if __name__ == '__main__':
             z_score = detect_lsh(sents=sents, lsh_model=lsh_model,
                                  lmbd=args.lmbd, lsh_dim=args.sp_dim)
             human_scores.append(z_score)
-
+    print("Saving scores...")
+    print(f"Average z-score of generations: {np.mean(z_scores):.3f}")
+    print(f"Average z-score of human texts: {np.mean(human_scores):.3f}")
+    print(f"Average z-score of paraphrased texts: {np.mean(para_scores):.3f}")
     z_score_name = os.path.join(
         args.dataset_path, "z_scores.npy")
     para_score_name = os.path.join(

@@ -1,9 +1,6 @@
 import argparse
 from datasets import load_from_disk
-import mauve
 import numpy as np
-import sampling_utils
-from nltk.tokenize import sent_tokenize
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from eval_clm import eval_perplexity, text_entropy, rep_ngram
 from collections import Counter
@@ -133,8 +130,8 @@ def run_sem_ent(model, gens, tokenizer, ref_texts, args):
         f.close()
     return sem_ent
     
-def eval_quality(model, gens, ref_texts, tokenizer):
-    
+def eval_quality(model, gens, ref_texts, tokenizer, args):
+
     if (type(gens[0]) == list):
         gens_text = [" ".join(g) for g in gens]
     else:
@@ -143,7 +140,7 @@ def eval_quality(model, gens, ref_texts, tokenizer):
     gen_ppl = eval_perplexity(model, tokenizer, gens_text)
 
     print("Evaluating semantic entropy")
-    sem_ent = run_sem_ent(model, gens, tokenizer, ref_texts)
+    sem_ent = run_sem_ent(model, gens, tokenizer, ref_texts, args)
     
     print("Evaluating n-gram repetition...")
     rep_scores = run_ngrams(gens_text, tokenizer)
@@ -157,11 +154,13 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('dataset_name', type=str)
     parser.add_argument('max_new_token', type=int)
-    parser.add_argument('--model_path', type=str, default='facebook/opt-2.7b')
+    parser.add_argument('--model_path', type=str, default='meta-llama/Llama-3.1-8B')
     parser.add_argument('--cluster_size', type=int, default=50)
     parser.add_argument('--human_ref_name')
     parser.add_argument('--gen_ref_name')
     parser.add_argument('--sem_ent_mode', type=str, choices = ['last_token', 'last_mean_pooling', 'all_mean_pooling'], default='last_token')
+    parser.add_argument('--load_kmeans_path', type=str, default=None)
+    parser.add_argument('--load_testgen_path', type=str, default=None)
     return parser.parse_args()
 
 if __name__ == '__main__':
@@ -172,6 +171,7 @@ if __name__ == '__main__':
     if args.gen_ref_name != None:
         gen_ref_texts = load_from_disk(args.gen_ref_name)['text']
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    tokenizer.pad_token = tokenizer.eos_token
     pad_id = tokenizer.encode(tokenizer.eos_token)[0]
     model = AutoModelForCausalLM.from_pretrained(args.model_path, return_dict=True, pad_token_id=pad_id).to('cuda')
     model.eval()
@@ -184,7 +184,7 @@ if __name__ == '__main__':
     gen_ppl = eval_perplexity(model, tokenizer, gens_text)
 
     print("Evaluating semantic entropy")
-    sem_ent = run_sem_ent(model, gens_text, tokenizer, gen_ref_texts)
+    sem_ent = run_sem_ent(model, gens_text, tokenizer, gen_ref_texts, args)
     
     print("Evaluating entropy...")
     gen_entros= run_entropy(gens_text, tokenizer)

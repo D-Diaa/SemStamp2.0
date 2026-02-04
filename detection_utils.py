@@ -4,15 +4,24 @@ from sampling_lsh_utils import get_mask_from_seed
 from sampling_kmeans_utils import get_cluster_mask, get_cluster_id
 import numpy as np
 import torch
-from bert_score import BERTScorer
+from bert_score import score as bert_score_func
 import matplotlib.pyplot as plt
 import os
 device = "cuda" if torch.cuda.is_available() else "cpu"
 rng = torch.Generator(device)
-scorer = BERTScorer(model_type = "microsoft/deberta-xlarge-mnli", rescale_with_baseline=True, device=device, lang = "en")
 
-def run_bert_score(gen_sents, para_sents):
-    P, R, F1 = scorer.score(gen_sents, para_sents)
+def run_bert_score(gen_sents, para_sents, max_len=450, batch_size=32):
+    if not gen_sents or not para_sents:
+        return 0.0
+    # Use roberta-large instead of deberta-xlarge-mnli due to tokenizer overflow
+    # bug with transformers 5.0.0 and bert-score 0.3.13
+    P, R, F1 = bert_score_func(
+        gen_sents, para_sents,
+        model_type="roberta-large",
+        device=device,
+        lang="en",
+        batch_size=batch_size
+    )
     return torch.mean(F1).item()
 
 def flatten_gens_and_paras(gens, paras):

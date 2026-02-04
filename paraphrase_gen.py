@@ -1,6 +1,7 @@
+from itertools import groupby
 from transformers import PegasusForConditionalGeneration, PegasusTokenizer, AutoTokenizer
 import argparse
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from datasets import load_from_disk, Dataset
 from nltk import sent_tokenize
 import os
@@ -8,9 +9,37 @@ import torch
 import openai
 import pickle
 from transformers import AutoTokenizer
-# from dipper import DipperParaphraser
 from paraphrase_gen_utils import accept_by_bigram_overlap, SParrot, query_openai, query_openai_bigram, gen_prompt, gen_bigram_prompt, extract_list   
-from sampling_utils import well_formed_sentence
+from nltk.tokenize import sent_tokenize
+from string import punctuation
+from itertools import groupby
+
+PUNCTS = '!.?'
+
+def well_formed_sentence(sent, end_sent=False):
+    sent = first_upper(sent)
+    sent = sent.replace('  ', ' ')
+    sent = sent.replace(' i ', " I ")
+    if end_sent and len(sent) > 0 and sent[-1] not in PUNCTS:
+        sent += "."
+    return clean_text(sent)
+
+def clean_text(s):
+    punc = set(punctuation) - set('.')
+    punc.add("\n")
+    newtext = []
+    for k, g in groupby(s):
+        if k in punc:
+            newtext.append(k)
+        else:
+            newtext.extend(g)
+    return ''.join(newtext)
+
+def first_upper(s):
+    if len(s) == 0:
+        return s
+    else:
+        return s[0].upper() + s[1:]
 
 device = 'cuda' if torch.cuda.is_available() else "cpu"
 num_beams = 25
