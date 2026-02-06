@@ -3,6 +3,7 @@ Visualization script for comparing watermark robustness with fixed vs context-de
 Generates publication-quality figures from detection results.
 
 Usage:
+    python visualize_fixed_comparison.py data/c4-val-250
     python visualize_fixed_comparison.py data/c4-val-250 --output figures/
 """
 
@@ -55,7 +56,8 @@ def parse_args():
     parser.add_argument('data_path', type=str, help='Base path to data directories (e.g., data/c4-val-250)')
     parser.add_argument('--suffix', type=str, default='-generated-parrot-bigram=False-threshold=0.0',
                         help='Suffix for data directories')
-    parser.add_argument('--output', type=str, default='figures', help='Output directory for figures')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output directory for figures (default: <data_path>/Figures_<suffix>)')
     return parser.parse_args()
 
 
@@ -410,7 +412,9 @@ def main():
     """Main entry point."""
     args = parse_args()
 
-    # Create output directory
+    # Default output directory: <data_path>/Figures_<suffix>
+    if args.output is None:
+        args.output = os.path.join(args.data_path, f"Figures_{args.suffix}")
     os.makedirs(args.output, exist_ok=True)
 
     print(f"Loading data from: {args.data_path}")

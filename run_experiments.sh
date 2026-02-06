@@ -9,7 +9,7 @@
 # Don't use set -e as it breaks the process monitoring logic
 
 # Default parameters
-CUDA_DEVICES="3,5,6,7"
+CUDA_DEVICES="4"
 DATA_FOLDER="data/c4-val-250"
 LSH_DIM=3
 KMEANS_DIM=8
@@ -18,7 +18,8 @@ DELTA=0.02
 HUMAN_TEXT="data/c4-human"
 PARAPHRASER="custom"
 PARA_BSZ=32
-CUSTOM_MODEL="Qwen/Qwen2.5-3B-Instruct"
+CUSTOM_MODEL="DDiaa/WM-Removal-Unigram-Qwen2.5-3B"
+CUSTOM_PROMPT="combine"
 FORCE_SAMPLE=false
 
 # Parse command line arguments
@@ -35,6 +36,7 @@ usage() {
     echo "  --human-text PATH     Path to human text data (default: data/c4-human)"
     echo "  --paraphraser NAME    Paraphraser model to use (default: pegasus)"
     echo "  --custom-model PATH   HuggingFace model path for custom paraphraser (default: Qwen/Qwen2.5-3B-Instruct)"
+    echo "  --custom-prompt NAME  Prompt style for custom paraphraser: standard, shuffle, combine (default: combine)"
     echo "  --para-bsz BATCH_SIZE    Batch size for paraphrasing (default: 32)"
     echo "  --modes MODES         Comma-separated modes to run (default: lsh,lsh_fixed,kmeans,kmeans_fixed)"
     echo "  --force-sample        Force re-sampling even if data already exists"
@@ -80,6 +82,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --custom-model)
             CUSTOM_MODEL="$2"
+            shift 2
+            ;;
+        --custom-prompt)
+            CUSTOM_PROMPT="$2"
             shift 2
             ;;
         --para-bsz)
@@ -170,7 +176,7 @@ run_experiment() {
 
         local para_args="--paraphraser ${PARAPHRASER}"
         if [[ -n "${CUSTOM_MODEL}" ]]; then
-            para_args="${para_args} --custom_model ${CUSTOM_MODEL} --bsz ${PARA_BSZ}"
+            para_args="${para_args} --custom_model ${CUSTOM_MODEL} --custom_prompt ${CUSTOM_PROMPT} --bsz ${PARA_BSZ}"
         fi
         CUDA_VISIBLE_DEVICES=${gpu} python paraphrase_gen.py "${gen_path}" ${para_args}
 
@@ -185,7 +191,7 @@ run_experiment() {
         local para_path
         if [[ "${PARAPHRASER}" == "custom" ]]; then
             local model_short="${CUSTOM_MODEL##*/}"
-            para_path="${gen_path}-custom-${model_short}"
+            para_path="${gen_path}-custom-${model_short}-${CUSTOM_PROMPT}"
         else
             para_path="${gen_path}-${PARAPHRASER}-bigram=${IS_BIGRAM}-threshold=0.0"
         fi
@@ -355,7 +361,7 @@ echo "Results summary:"
 for mode in "${TASK_MODES[@]}"; do
     if [[ "${PARAPHRASER}" == "custom" ]]; then
         model_short="${CUSTOM_MODEL##*/}"
-        results_file="${DATA_FOLDER}/${mode}-generated-custom-${model_short}/results.csv"
+        results_file="${DATA_FOLDER}/${mode}-generated-custom-${model_short}-${CUSTOM_PROMPT}/results.csv"
     else
         is_bigram="False"
         [[ "${PARAPHRASER}" == *"bigram"* ]] && is_bigram="True"

@@ -1,3 +1,6 @@
+import os
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
 from collections import Counter
 import openai
 import backoff
@@ -5,6 +8,8 @@ import torch
 import re
 from tqdm import trange
 from detection_utils import run_bert_score
+
+
 device = 'cuda' if torch.cuda.is_available() else "cpu"
 from parrot import Parrot
 # stops = set(stopwords.words('english'))
@@ -27,13 +32,31 @@ class SParrot(Parrot):
         # Pre-create generation configs to avoid deprecation warnings
         self._GenerationConfig = GenerationConfig
 
+    def _clean_and_prefix(self, input_phrase):
+        cleaned = re.sub('[^a-zA-Z0-9 \?\'\-\/\:\.]', '', input_phrase)
+        return "paraphrase: " + cleaned
+
+    def _filter_and_rank(self, input_phrase, prefixed_phrase, paraphrases,
+                         adequacy_threshold, fluency_threshold, diversity_ranker):
+        adequacy_filtered = self.adequacy_score.filter(
+            prefixed_phrase, paraphrases, adequacy_threshold, self.device)
+        if len(adequacy_filtered) == 0:
+            adequacy_filtered = paraphrases
+        fluency_filtered = self.fluency_score.filter(
+            adequacy_filtered, fluency_threshold, self.device)
+        if len(fluency_filtered) == 0:
+            fluency_filtered = adequacy_filtered
+        diversity_scored = self.diversity_score.rank(
+            input_phrase, fluency_filtered, diversity_ranker)
+        para_phrases = sorted(diversity_scored.items(), key=lambda x: x[1], reverse=True)
+        return [phrase for phrase, score in para_phrases]
+
     def augment(self, input_phrase, use_gpu=True, diversity_ranker="levenshtein", do_diverse=False,
                 max_return_phrases=10, max_length=32, adequacy_threshold=0.90, fluency_threshold=0.90):
         if len(input_phrase) >= max_length:
             max_length += 32
 
-        cleaned_phrase = re.sub('[^a-zA-Z0-9 \?\'\-\/\:\.]', '', input_phrase)
-        prefixed_phrase = "paraphrase: " + cleaned_phrase
+        prefixed_phrase = self._clean_and_prefix(input_phrase)
         input_ids = self.tokenizer.encode(prefixed_phrase, return_tensors='pt').to(self.device)
 
         if do_diverse:
@@ -50,7 +73,7 @@ class SParrot(Parrot):
                 early_stopping=True,
                 num_return_sequences=max_return_phrases,
             )
-            preds = self.model.generate(input_ids, generation_config=gen_config, trust_remote_code=True)
+            preds = self.model.generate(input_ids, generation_config=gen_config, trust_remote_code=True, custom_generate='transformers-community/group-beam-search')
         else:
             gen_config = self._GenerationConfig(
                 do_sample=True,
@@ -68,16 +91,70 @@ class SParrot(Parrot):
             gen_pp = re.sub('[^a-zA-Z0-9 \?\'\-]', '', gen_pp)
             paraphrases.add(gen_pp)
 
-        adequacy_filtered_phrases = self.adequacy_score.filter(prefixed_phrase, paraphrases, adequacy_threshold, self.device)
-        if len(adequacy_filtered_phrases) == 0:
-            adequacy_filtered_phrases = paraphrases
-        fluency_filtered_phrases = self.fluency_score.filter(adequacy_filtered_phrases, fluency_threshold, self.device)
-        if len(fluency_filtered_phrases) == 0:
-            fluency_filtered_phrases = adequacy_filtered_phrases
-        diversity_scored_phrases = self.diversity_score.rank(input_phrase, fluency_filtered_phrases, diversity_ranker)
+        return self._filter_and_rank(
+            input_phrase, prefixed_phrase, paraphrases,
+            adequacy_threshold, fluency_threshold, diversity_ranker)
 
-        para_phrases = sorted(diversity_scored_phrases.items(), key=lambda x: x[1], reverse=True)
-        return [phrase for phrase, score in para_phrases]
+    def augment_batch(self, input_phrases, use_gpu=True, diversity_ranker="levenshtein", do_diverse=False,
+                      max_return_phrases=10, max_length=32, adequacy_threshold=0.90, fluency_threshold=0.90):
+        """Batch version of augment - generates paraphrases for multiple sentences in one forward pass."""
+        # Compute effective max_length (use max across batch for uniform generation)
+        effective_max_length = max_length
+        for phrase in input_phrases:
+            if len(phrase) >= max_length:
+                effective_max_length = max(effective_max_length, max_length + 32)
+
+        prefixed_phrases = [self._clean_and_prefix(p) for p in input_phrases]
+        batch_encoding = self.tokenizer(
+            prefixed_phrases, return_tensors='pt', padding=True, truncation=True
+        ).to(self.device)
+
+        if do_diverse:
+            for n in range(2, 9):
+                if max_return_phrases % n == 0:
+                    break
+            gen_config = self._GenerationConfig(
+                do_sample=False,
+                max_length=effective_max_length,
+                num_beams=max_return_phrases,
+                num_beam_groups=n,
+                diversity_penalty=2.0,
+                early_stopping=True,
+                num_return_sequences=max_return_phrases,
+            )
+            preds = self.model.generate(
+                **batch_encoding, generation_config=gen_config,
+                trust_remote_code=True,
+                custom_generate='transformers-community/group-beam-search')
+        else:
+            gen_config = self._GenerationConfig(
+                do_sample=True,
+                max_length=effective_max_length,
+                top_k=50,
+                top_p=0.95,
+                early_stopping=True,
+                num_return_sequences=max_return_phrases,
+            )
+            preds = self.model.generate(**batch_encoding, generation_config=gen_config)
+
+        # Decode and group outputs per input sentence
+        all_decoded = self.tokenizer.batch_decode(preds, skip_special_tokens=True)
+        batch_size = len(input_phrases)
+        results = []
+        for i in range(batch_size):
+            start = i * max_return_phrases
+            end = start + max_return_phrases
+            paraphrases = set()
+            for gen_pp in all_decoded[start:end]:
+                gen_pp = gen_pp.lower()
+                gen_pp = re.sub('[^a-zA-Z0-9 \?\'\-]', '', gen_pp)
+                paraphrases.add(gen_pp)
+
+            results.append(self._filter_and_rank(
+                input_phrases[i], prefixed_phrases[i], paraphrases,
+                adequacy_threshold, fluency_threshold, diversity_ranker))
+
+        return results
 
 
 def tokenize(tokenizer, text):
@@ -111,6 +188,14 @@ def accept_by_bigram_overlap(sent, para_sents, tokenizer, bert_threshold = 0.03)
     min_overlap = len(input_ids)
 
     bert_scores = [run_bert_score([sent], [para_sent]) for para_sent in para_sents]
+    
+    # Sort by BERTScore descending to ensure the first candidate has the highest score
+    sorted_indices = sorted(range(len(para_sents)), key=lambda i: bert_scores[i], reverse=True)
+    para_sents = [para_sents[i] for i in sorted_indices]
+    para_ids = [para_ids[i] for i in sorted_indices]
+    para_bigrams = [para_bigrams[i] for i in sorted_indices]
+    bert_scores = [bert_scores[i] for i in sorted_indices]
+
     max_score = bert_scores[0]
     best_paraphrased = para_sents[0]
     score_threshold = bert_threshold * max_score

@@ -1,5 +1,5 @@
 from itertools import groupby
-from transformers import PegasusForConditionalGeneration, PegasusTokenizer, AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import argparse
 from tqdm import tqdm
 from datasets import load_from_disk, Dataset
@@ -44,88 +44,17 @@ def first_upper(s):
 device = 'cuda' if torch.cuda.is_available() else "cpu"
 num_beams = 25
 
-def pegasus_paraphrase(texts, 
-                       tokenizer, 
-                       paraphraser_name="tuner007/pegasus_paraphrase", 
-                       device='cuda', 
-                       num_beams = 10, 
-                       temp=2, 
-                       bsz=-1,
-                       bigram=False, 
-                       bert_threshold=0.03
-                       ):
-    paraphraser = PegasusForConditionalGeneration.from_pretrained(
-        paraphraser_name).to(device)
-    paraphraser_tokenizer = PegasusTokenizer.from_pretrained(paraphraser_name)
-
-    def paraphrase(sents):
-        '''
-        Arguments:
-            sents: list of sentences (max len under 60!)
-        Returns:
-            paraphrased: list of paraphrased sents
-        '''
-        batch = paraphraser_tokenizer(
-            sents, truncation=True, padding='longest', return_tensors="pt", max_length=60).to(device)
-        
-        paraphrased_ids = paraphraser.generate(
-            **batch, max_length=60, num_beams=num_beams, num_return_sequences=num_beams, temperature=temp, repetition_penalty=1.03)
-        # batch decode and return the first one
-        paraphrased = [paraphraser_tokenizer.decode(paraphrased_ids[i*num_beams], skip_special_tokens=True) for i in range(len(paraphrased_ids) // num_beams)]       
-            # breakpoint()    
-        
-        return paraphrased
-    
-    # dataset has to be a text list
-    sents, data_len = [], []
-    for text in tqdm(texts, desc="Tokenizer"):
-        sent_list = sent_tokenize(text)
-        sents.extend(sent_list)
-        data_len.append(len(sent_list))
-    paras = []
-
-    if bsz != -1:
-        batched_sents = [sents[i:i+bsz] for i in range(0, len(sents), bsz)]
-        for batch in tqdm(batched_sents, desc="Paraphrasing"):
-            paraphrased = paraphrase(batch)
-            paras.extend(paraphrased)
-
-    else:
-        for sent in tqdm(sents):
-            paraphrased = paraphrase([sent])
-            paraphrased = [well_formed_sentence(para) for para in paraphrased]
-            if bigram:
-                para = accept_by_bigram_overlap(sent, paraphrased, tokenizer, bert_threshold)
-            else: 
-                para = paraphrased[0]
-            paras.append(para)
-    
-    start_pos = 0
-    output = []
-    new_texts = []
-    for l in data_len:
-        output.append(paras[start_pos: start_pos+l])
-        new_texts.append(sents[start_pos: start_pos+l])
-        start_pos+=l
-    new_dataset = Dataset.from_dict(
-        {'text': new_texts, 'para_text': output})
-    name = args.data_path + \
-        f'-pegasus-bigram={bigram}-threshold={bert_threshold}'
-    new_dataset.save_to_disk(name)
-    return output
-
-def parrot_paraphrase(parrot, texts, tokenizer, num_beams=10, bigram=False, save_to_disk=True, avg_sent_len=20, save_by_sents=False, bert_threshold=0.03):
+def parrot_paraphrase(parrot, texts, tokenizer, num_beams=10, bigram=False, save_to_disk=True, avg_sent_len=20, save_by_sents=False, bert_threshold=0.03, bsz=1):
     # modified parrot source code to have the num_beams argument
-    def paraphrase(sent):
-        para_phrases = parrot.augment(input_phrase=sent,
-                                      use_gpu=True,
-                                      diversity_ranker="levenshtein",
-                                      do_diverse=True,
-                                      max_return_phrases=num_beams,
-                                      max_length=60,
-                                      adequacy_threshold=0.8,
-                                      fluency_threshold=0.8)
-        return para_phrases
+    augment_kwargs = dict(
+        use_gpu=True,
+        diversity_ranker="levenshtein",
+        do_diverse=True,
+        max_return_phrases=num_beams,
+        max_length=60,
+        adequacy_threshold=0.8,
+        fluency_threshold=0.8,
+    )
 
     sents, data_len = [], []
     for text in tqdm(texts, desc="Tokenizer"):
@@ -135,16 +64,21 @@ def parrot_paraphrase(parrot, texts, tokenizer, num_beams=10, bigram=False, save
     start_pos = 0
     paras = []
     total_paraphrased = []
-    for sent in tqdm(sents):
-        paraphrased = paraphrase(sent)
-        paraphrased = [well_formed_sentence(
-            para, end_sent=True) for para in paraphrased]
-        total_paraphrased.append(paraphrased)
-        if bigram:
-            para = accept_by_bigram_overlap(sent, paraphrased, tokenizer, bert_threshold=bert_threshold)
+    batched_sents = [sents[i:i + bsz] for i in range(0, len(sents), bsz)]
+    for batch in tqdm(batched_sents, desc="Paraphrasing"):
+        if bsz == 1:
+            batch_results = [parrot.augment(input_phrase=batch[0], **augment_kwargs)]
         else:
-            para = paraphrased[0]
-        paras.append(para)
+            batch_results = parrot.augment_batch(input_phrases=batch, **augment_kwargs)
+        for sent, paraphrased in zip(batch, batch_results):
+            paraphrased = [well_formed_sentence(
+                para, end_sent=True) for para in paraphrased]
+            total_paraphrased.append(paraphrased)
+            if bigram:
+                para = accept_by_bigram_overlap(sent, paraphrased, tokenizer, bert_threshold=bert_threshold)
+            else:
+                para = paraphrased[0]
+            paras.append(para)
     start_pos = 0
     output = []
     new_texts = []
@@ -230,7 +164,13 @@ COMBINE_PROMPT = (
     "Skip the preamble. Just rewrite the text directly."
 )
 
-def custom_paraphrase(texts, custom_model, device='cuda', bsz=1):
+CUSTOM_PROMPTS = {
+    'standard': STANDARD_PROMPT,
+    'shuffle': SHUFFLE_PROMPT,
+    'combine': COMBINE_PROMPT,
+}
+
+def custom_paraphrase(texts, custom_model, device='cuda', bsz=1, custom_prompt='combine'):
     # Auto-detect whether custom_model is a LoRA adapter or a full model
     try:
         from peft import PeftConfig, PeftModel
@@ -251,10 +191,12 @@ def custom_paraphrase(texts, custom_model, device='cuda', bsz=1):
     # Left-padding is required for batched generation with causal LMs
     para_tokenizer.padding_side = "left"
 
+    system_prompt = CUSTOM_PROMPTS[custom_prompt]
+
     def build_prompt(text):
         return para_tokenizer.apply_chat_template(
             [
-                {"role": "system", "content": COMBINE_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"\n[[START OF TEXT]]\n{text}\n[[END OF TEXT]]"},
             ],
             tokenize=False,
@@ -289,7 +231,7 @@ def custom_paraphrase(texts, custom_model, device='cuda', bsz=1):
         output.extend(paras)
 
     model_short = custom_model.split("/")[-1]
-    name = args.data_path + f'-custom-{model_short}'
+    name = args.data_path + f'-custom-{model_short}-{custom_prompt}'
     new_dataset = Dataset.from_dict({'text': texts, 'para_text': output})
     new_dataset.save_to_disk(name)
     return output
@@ -300,15 +242,16 @@ if __name__ == '__main__':
     parser.add_argument('--model_path', type=str, default='AbeHou/opt-1.3b-semstamp')
     parser.add_argument('--bsz', type=int, default=-1)
     parser.add_argument('--paraphraser', type=str,
-                        default="parrot", choices=['pegasus',
-                                                    'parrot',
+                        default="parrot", choices=['parrot',
                                                     'openai',
                                                     'parrot-bigram',
-                                                    'pegasus-bigram',
                                                     'openai-bigram',
                                                     'custom'])
     parser.add_argument('--custom_model', type=str, default=None,
                         help='HuggingFace model path for custom paraphraser (PEFT/LoRA adapter)')
+    parser.add_argument('--custom_prompt', type=str, default='combine',
+                        choices=['standard', 'shuffle', 'combine'],
+                        help='Prompt style for custom paraphraser')
     parser.add_argument('--temp', type=float, default=2.0, help='decode temperature')
     parser.add_argument('--bert_threshold', type=float, default=0.0, help='threshold for bert similarity between original and paraphrased')
     parser.add_argument('--num_beams', type=int, default=10, help='number of beams for beam-search')
@@ -326,16 +269,12 @@ if __name__ == '__main__':
 
     if args.paraphraser == 'parrot':
         parrot = SParrot()
-        parrot_paraphrase(parrot, texts, tokenizer, num_beams=args.num_beams, 
-                            bert_threshold=args.bert_threshold)
+        parrot_paraphrase(parrot, texts, tokenizer, num_beams=args.num_beams,
+                            bert_threshold=args.bert_threshold, bsz=batch_size)
     elif args.paraphraser == 'parrot-bigram':
         parrot = SParrot()
         parrot_paraphrase(parrot, texts, tokenizer, bigram=True, num_beams=args.num_beams,
-                            bert_threshold=args.bert_threshold)
-    elif args.paraphraser == 'pegasus-bigram':
-        pegasus_paraphrase(texts, tokenizer, bigram=True, num_beams=args.num_beams, bert_threshold=args.bert_threshold, bsz=batch_size)
-    elif args.paraphraser == 'pegasus':
-        pegasus_paraphrase(texts, tokenizer, num_beams = args.num_beams, bert_threshold=args.bert_threshold, bsz=batch_size)
+                            bert_threshold=args.bert_threshold, bsz=batch_size)
     elif args.paraphraser == 'openai':
         client = openai.OpenAI(
             api_key=os.getenv('OPENAI_API_KEY')
@@ -348,6 +287,6 @@ if __name__ == '__main__':
         new_texts, paras = paraphrase_openai(client, texts, args.num_beams, bigram=True)
     elif args.paraphraser == 'custom':
         assert args.custom_model is not None, "--custom_model is required when using --paraphraser custom"
-        custom_paraphrase(texts, args.custom_model, device=device, bsz=batch_size)
+        custom_paraphrase(texts, args.custom_model, device=device, bsz=batch_size, custom_prompt=args.custom_prompt)
     else:
         raise NotImplementedError
