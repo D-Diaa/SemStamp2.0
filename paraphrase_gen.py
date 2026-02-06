@@ -1,5 +1,5 @@
 from itertools import groupby
-from transformers import PegasusForConditionalGeneration, PegasusTokenizer, AutoTokenizer
+from transformers import PegasusForConditionalGeneration, PegasusTokenizer, AutoTokenizer, AutoModelForCausalLM
 import argparse
 from tqdm import tqdm
 from datasets import load_from_disk, Dataset
@@ -9,7 +9,7 @@ import torch
 import openai
 import pickle
 from transformers import AutoTokenizer
-from paraphrase_gen_utils import accept_by_bigram_overlap, SParrot, query_openai, query_openai_bigram, gen_prompt, gen_bigram_prompt, extract_list   
+from paraphrase_gen_utils import accept_by_bigram_overlap, SParrot, query_openai, query_openai_bigram, gen_prompt, gen_bigram_prompt, extract_list
 from nltk.tokenize import sent_tokenize
 from string import punctuation
 from itertools import groupby
@@ -206,22 +206,115 @@ def paraphrase_openai(client, texts, num_beams, bigram=False):
     Dataset.from_dict({'text': new_texts, 'para_text': all_paras}).save_to_disk(save_path)
     return new_texts, all_paras
 
+STANDARD_PROMPT = (
+    "You are an expert copy-editor. Please rewrite the following text in your own voice and paraphrase all sentences.\n"
+    "Ensure that the final output contains the same information as the original text and has roughly the same length.\n"
+    "Do not leave out any important details when rewriting in your own voice.\n"
+    "Do not include any information that is not present in the original text.\n"
+    "Do not respond with a greeting or any other extraneous information.\n"
+    "Skip the preamble. Just rewrite the text directly."
+)
+
+SHUFFLE_PROMPT = (
+    "Rewrite the following text. Paraphrase every sentence, shuffle sentence order where possible, "
+    "and preserve all original information exactly—no additions, no omissions, and roughly the same length. "
+    "Output only the rewritten text."
+)
+
+COMBINE_PROMPT = (
+    "You are an expert copy-editor. Please rewrite the following text in your own voice, merging every pair of consecutive sentences into one sentence where possible, and paraphrasing all sentences.\n"
+    "Ensure that the final output contains the same information as the original text and has roughly the same length.\n"
+    "Do not leave out any important details when rewriting in your own voice.\n"
+    "Do not include any information that is not present in the original text.\n"
+    "Do not respond with a greeting or any other extraneous information.\n"
+    "Skip the preamble. Just rewrite the text directly."
+)
+
+def custom_paraphrase(texts, custom_model, device='cuda', bsz=1):
+    # Auto-detect whether custom_model is a LoRA adapter or a full model
+    try:
+        from peft import PeftConfig, PeftModel
+        adapter_config = PeftConfig.from_pretrained(custom_model)
+        base_model_name = adapter_config.base_model_name_or_path
+        print(f"Detected LoRA adapter, loading base model: {base_model_name}")
+        para_tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+        model = AutoModelForCausalLM.from_pretrained(base_model_name, dtype=torch.float16).to(device)
+        model = PeftModel.from_pretrained(model, custom_model).to(device)
+    except Exception:
+        print(f"No adapter config found, loading as full model: {custom_model}")
+        para_tokenizer = AutoTokenizer.from_pretrained(custom_model)
+        model = AutoModelForCausalLM.from_pretrained(custom_model, dtype=torch.float16).to(device)
+    model.eval()
+
+    if para_tokenizer.pad_token_id is None:
+        para_tokenizer.pad_token_id = para_tokenizer.eos_token_id
+    # Left-padding is required for batched generation with causal LMs
+    para_tokenizer.padding_side = "left"
+
+    def build_prompt(text):
+        return para_tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": COMBINE_PROMPT},
+                {"role": "user", "content": f"\n[[START OF TEXT]]\n{text}\n[[END OF TEXT]]"},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        ) + "[[START OF PARAPHRASE]]\n"
+
+    def paraphrase_batch(batch_texts):
+        prompts = [build_prompt(text) for text in batch_texts]
+        inputs = para_tokenizer(prompts, return_tensors="pt", padding=True).to(device)
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=512,
+                temperature=1.0,
+                do_sample=True,
+                pad_token_id=para_tokenizer.pad_token_id,
+            )
+        results = []
+        for i in range(len(prompts)):
+            # Decode only the newly generated tokens (skip the input)
+            new_tokens = outputs[i][inputs['input_ids'].shape[1]:]
+            decoded = para_tokenizer.decode(new_tokens, skip_special_tokens=True)
+            if "[[END OF" in decoded:
+                decoded = decoded.split("[[END OF")[0]
+            results.append(decoded.strip())
+        return results
+
+    output = []
+    batched_texts = [texts[i:i+bsz] for i in range(0, len(texts), bsz)]
+    for batch in tqdm(batched_texts, desc=f"Paraphrasing with {custom_model}"):
+        paras = paraphrase_batch(batch)
+        output.extend(paras)
+
+    model_short = custom_model.split("/")[-1]
+    name = args.data_path + f'-custom-{model_short}'
+    new_dataset = Dataset.from_dict({'text': texts, 'para_text': output})
+    new_dataset.save_to_disk(name)
+    return output
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('data_path', type=str)
     parser.add_argument('--model_path', type=str, default='AbeHou/opt-1.3b-semstamp')
     parser.add_argument('--bsz', type=int, default=-1)
     parser.add_argument('--paraphraser', type=str,
-                        default="parrot", choices=['pegasus', 
-                                                    'parrot', 
+                        default="parrot", choices=['pegasus',
+                                                    'parrot',
                                                     'openai',
-                                                    'parrot-bigram', 
-                                                    'pegasus-bigram', 
-                                                    'openai-bigram'])
+                                                    'parrot-bigram',
+                                                    'pegasus-bigram',
+                                                    'openai-bigram',
+                                                    'custom'])
+    parser.add_argument('--custom_model', type=str, default=None,
+                        help='HuggingFace model path for custom paraphraser (PEFT/LoRA adapter)')
     parser.add_argument('--temp', type=float, default=2.0, help='decode temperature')
     parser.add_argument('--bert_threshold', type=float, default=0.0, help='threshold for bert similarity between original and paraphrased')
     parser.add_argument('--num_beams', type=int, default=10, help='number of beams for beam-search')
     args = parser.parse_args()
+
+    batch_size = args.bsz if args.bsz > 0 else 1
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path)
@@ -240,9 +333,9 @@ if __name__ == '__main__':
         parrot_paraphrase(parrot, texts, tokenizer, bigram=True, num_beams=args.num_beams,
                             bert_threshold=args.bert_threshold)
     elif args.paraphraser == 'pegasus-bigram':
-        pegasus_paraphrase(texts, tokenizer, bigram=True, num_beams=args.num_beams, bert_threshold=args.bert_threshold)
+        pegasus_paraphrase(texts, tokenizer, bigram=True, num_beams=args.num_beams, bert_threshold=args.bert_threshold, bsz=batch_size)
     elif args.paraphraser == 'pegasus':
-        pegasus_paraphrase(texts, tokenizer, num_beams = args.num_beams, bert_threshold=args.bert_threshold, bsz=args.bsz)
+        pegasus_paraphrase(texts, tokenizer, num_beams = args.num_beams, bert_threshold=args.bert_threshold, bsz=batch_size)
     elif args.paraphraser == 'openai':
         client = openai.OpenAI(
             api_key=os.getenv('OPENAI_API_KEY')
@@ -253,5 +346,8 @@ if __name__ == '__main__':
             api_key=os.getenv('OPENAI_API_KEY')
         )
         new_texts, paras = paraphrase_openai(client, texts, args.num_beams, bigram=True)
+    elif args.paraphraser == 'custom':
+        assert args.custom_model is not None, "--custom_model is required when using --paraphraser custom"
+        custom_paraphrase(texts, args.custom_model, device=device, bsz=batch_size)
     else:
         raise NotImplementedError

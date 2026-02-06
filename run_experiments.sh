@@ -9,21 +9,24 @@
 # Don't use set -e as it breaks the process monitoring logic
 
 # Default parameters
-CUDA_DEVICES="4,5"
+CUDA_DEVICES="3,5,6,7"
 DATA_FOLDER="data/c4-val-250"
 LSH_DIM=3
 KMEANS_DIM=8
 CC_PATH="data/c4-train/cc.pt"
 DELTA=0.02
 HUMAN_TEXT="data/c4-human"
-PARAPHRASER="parrot"
+PARAPHRASER="custom"
+PARA_BSZ=32
+CUSTOM_MODEL="Qwen/Qwen2.5-3B-Instruct"
+FORCE_SAMPLE=false
 
 # Parse command line arguments
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --gpus DEVICES        Comma-separated list of GPU IDs (default: 4,5)"
+    echo "  --gpus DEVICES        Comma-separated list of GPU IDs to use (default: 3,5,6,7)"
     echo "  --data FOLDER         Data folder path (default: data/c4-val-200)"
     echo "  --lsh-dim DIM         LSH dimension (default: 3)"
     echo "  --kmeans-dim DIM      KMeans dimension (default: 8)"
@@ -31,7 +34,10 @@ usage() {
     echo "  --delta DELTA         Delta/margin parameter (default: 0.02)"
     echo "  --human-text PATH     Path to human text data (default: data/c4-human)"
     echo "  --paraphraser NAME    Paraphraser model to use (default: pegasus)"
+    echo "  --custom-model PATH   HuggingFace model path for custom paraphraser (default: Qwen/Qwen2.5-3B-Instruct)"
+    echo "  --para-bsz BATCH_SIZE    Batch size for paraphrasing (default: 32)"
     echo "  --modes MODES         Comma-separated modes to run (default: lsh,lsh_fixed,kmeans,kmeans_fixed)"
+    echo "  --force-sample        Force re-sampling even if data already exists"
     echo "  -h, --help            Show this help message"
     exit 1
 }
@@ -72,9 +78,21 @@ while [[ $# -gt 0 ]]; do
             PARAPHRASER="$2"
             shift 2
             ;;
+        --custom-model)
+            CUSTOM_MODEL="$2"
+            shift 2
+            ;;
+        --para-bsz)
+            PARA_BSZ="$2"
+            shift 2
+            ;;
         --modes)
             MODES="$2"
             shift 2
+            ;;
+        --force-sample)
+            FORCE_SAMPLE=true
+            shift
             ;;
         -h|--help)
             usage
@@ -125,25 +143,36 @@ run_experiment() {
         echo "=============================================="
         echo "Starting experiment: ${mode} on GPU ${gpu}"
         echo "=============================================="
+        local gen_path="${DATA_FOLDER}/${mode}-generated"
+
+
         echo "=== SAMPLING: ${mode} ==="
         echo "Started at: $(date)"
 
-        # Run sampling
-        CUDA_VISIBLE_DEVICES=${gpu} python sampling.py "${DATA_FOLDER}" \
-            --sp_mode "${mode}" \
-            --sp_dim "${sp_dim}" \
-            --delta "${DELTA}" \
-            ${extra_args}
+        # Skip sampling if data already exists (unless --force-sample)
+        if [[ "${FORCE_SAMPLE}" == false ]] && ls "${gen_path}"/data*.arrow 1>/dev/null 2>&1; then
+            echo "Found existing data in ${gen_path}, skipping sampling."
+        else
+            # Run sampling
+            CUDA_VISIBLE_DEVICES=${gpu} python sampling.py "${DATA_FOLDER}" \
+                --sp_mode "${mode}" \
+                --sp_dim "${sp_dim}" \
+                --delta "${DELTA}" \
+                ${extra_args}
+        fi
 
         echo "Sampling completed at: $(date)"
 
         # Run paraphrase generation
-        local gen_path="${DATA_FOLDER}/${mode}-generated"
         echo ""
         echo "=== PARAPHRASING: ${mode} ==="
         echo "Input: ${gen_path}"
 
-        CUDA_VISIBLE_DEVICES=${gpu} python paraphrase_gen.py "${gen_path}" --paraphraser "${PARAPHRASER}"
+        local para_args="--paraphraser ${PARAPHRASER}"
+        if [[ -n "${CUSTOM_MODEL}" ]]; then
+            para_args="${para_args} --custom_model ${CUSTOM_MODEL} --bsz ${PARA_BSZ}"
+        fi
+        CUDA_VISIBLE_DEVICES=${gpu} python paraphrase_gen.py "${gen_path}" ${para_args}
 
         echo "Paraphrasing completed at: $(date)"
 
@@ -153,7 +182,13 @@ run_experiment() {
         fi
 
         # Run detection
-        local para_path="${gen_path}-${PARAPHRASER}-bigram=${IS_BIGRAM}-threshold=0.0"
+        local para_path
+        if [[ "${PARAPHRASER}" == "custom" ]]; then
+            local model_short="${CUSTOM_MODEL##*/}"
+            para_path="${gen_path}-custom-${model_short}"
+        else
+            para_path="${gen_path}-${PARAPHRASER}-bigram=${IS_BIGRAM}-threshold=0.0"
+        fi
         echo ""
         echo "=== DETECTION: ${mode} ==="
         echo "Input: ${para_path}"
@@ -318,7 +353,14 @@ echo ""
 # Print summary of results
 echo "Results summary:"
 for mode in "${TASK_MODES[@]}"; do
-    results_file="${DATA_FOLDER}/${mode}-generated-pegasus-bigram=False-threshold=0.0/results.csv"
+    if [[ "${PARAPHRASER}" == "custom" ]]; then
+        model_short="${CUSTOM_MODEL##*/}"
+        results_file="${DATA_FOLDER}/${mode}-generated-custom-${model_short}/results.csv"
+    else
+        is_bigram="False"
+        [[ "${PARAPHRASER}" == *"bigram"* ]] && is_bigram="True"
+        results_file="${DATA_FOLDER}/${mode}-generated-${PARAPHRASER}-bigram=${is_bigram}-threshold=0.0/results.csv"
+    fi
     if [[ -f "$results_file" ]]; then
         echo ""
         echo "=== ${mode} ==="
