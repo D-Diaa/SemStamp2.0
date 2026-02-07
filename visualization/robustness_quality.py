@@ -379,48 +379,64 @@ def plot_heatmap_tables(cross_data: dict, output_dir: str):
         plot_heatmap_table(cross_data, output_dir, group_name)
 
 
-# --- Cross-Method Per-Suffix Quality Bars ---
+# --- Cross-Method Per-Suffix Tradeoff Scatter ---
 
-def plot_cross_method_quality_bars(cross_data: dict, suffix: str, output_dir: str,
-                                   detection_metric: str = 'auroc',
-                                   quality_metric: str = 'mauve'):
-    """Per-suffix bar chart: all 4 methods side by side with quality on secondary axis."""
+def plot_cross_method_tradeoff_scatter(cross_data: dict, suffix: str, output_dir: str):
+    """Per-suffix tradeoff scatter: quality (x) vs detection (y) for all methods.
+
+    Generates one figure per quality metric, each with subplots for each detection metric.
+    Similar to Pareto plots but scoped to a single paraphraser with all 4 methods shown.
+    """
     available_methods = [m for m in METHODS if suffix in cross_data.get(m, {})]
     if not available_methods:
         return
 
-    # Check if any have quality data
     has_any_quality = any(cross_data[m][suffix].get('has_quality', False) for m in available_methods)
     if not has_any_quality:
         return
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    x = np.arange(len(available_methods))
-    width = 0.6
-
-    det_vals = [cross_data[m][suffix].get(detection_metric, 0) for m in available_methods]
-    colors = [COLORS[m] for m in available_methods]
-
-    ax.bar(x, det_vals, width, color=colors, edgecolor='black', alpha=0.85)
-    ax.set_ylabel(METRIC_LABELS.get(detection_metric, detection_metric))
-    ax.set_xticks(x)
-    ax.set_xticklabels([LABELS[m] for m in available_methods], rotation=15, ha='right')
-
-    # Quality on secondary axis
-    ax2 = ax.twinx()
-    qual_vals = [cross_data[m][suffix].get(quality_metric, np.nan) for m in available_methods]
-    ax2.scatter(x, qual_vals, marker='D', s=100, c=colors, edgecolors='black',
-                linewidth=1.5, zorder=5, label=METRIC_LABELS.get(quality_metric, quality_metric))
-    ax2.set_ylabel(METRIC_LABELS.get(quality_metric, quality_metric), color='gray')
-    ax2.tick_params(axis='y', labelcolor='gray')
-    ax2.legend(loc='upper right', fontsize=9)
-
     paraphraser_label = suffix_to_label(suffix)
-    ax.set_title(f'Robustness vs Quality: {paraphraser_label}')
 
-    plt.tight_layout()
-    save_figure(output_dir, 'quality_comparison')
+    for x_metric in PARETO_X_METRICS:
+        # Check if any method has this quality metric
+        has_metric = any(
+            cross_data[m][suffix].get(x_metric) is not None for m in available_methods
+        )
+        if not has_metric:
+            continue
+
+        fig, axes = plt.subplots(1, len(PARETO_Y_METRICS), figsize=(7 * len(PARETO_Y_METRICS), 6))
+        if len(PARETO_Y_METRICS) == 1:
+            axes = [axes]
+
+        for ax, y_metric in zip(axes, PARETO_Y_METRICS):
+            for method in available_methods:
+                entry = cross_data[method][suffix]
+                x_val = entry.get(x_metric)
+                y_val = entry.get(y_metric)
+                if x_val is None or y_val is None:
+                    continue
+
+                ax.scatter(x_val, y_val, c=COLORS[method], marker=MARKERS[method],
+                           s=MARKER_SIZES[method], label=LABELS[method],
+                           edgecolors='black', linewidth=0.8, zorder=3)
+
+                ax.annotate(LABELS[method], (x_val, y_val), textcoords='offset points',
+                            xytext=(6, 6), fontsize=8, alpha=0.8)
+
+            ax.set_xlabel(METRIC_LABELS.get(x_metric, x_metric))
+            ax.set_ylabel(METRIC_LABELS.get(y_metric, y_metric))
+            ax.legend(loc='best', fontsize=9)
+
+        fig.suptitle(f'{paraphraser_label}: Detection vs {METRIC_LABELS.get(x_metric, x_metric)}',
+                     fontsize=14)
+        fig.text(0.5, -0.01,
+                 f'Each point is one watermark method. '
+                 f'Lower detection (y) with higher {METRIC_LABELS.get(x_metric, x_metric)} (x) '
+                 f'means the watermark is easier to remove without degrading quality.',
+                 ha='center', fontsize=9, style='italic', color='gray')
+        plt.tight_layout(rect=[0, 0.02, 1, 0.95])
+        save_figure(output_dir, f'tradeoff_{x_metric}')
 
 
 # --- Summary CSV ---
@@ -515,7 +531,7 @@ def run_robustness_quality_visualization(data_path: str, suffixes: list,
         label = suffix_to_label(suffix)
         suffix_output = os.path.join(data_path, 'figures', 'robustness', label)
         if os.path.isdir(suffix_output):
-            plot_cross_method_quality_bars(cross_data, suffix, suffix_output)
+            plot_cross_method_tradeoff_scatter(cross_data, suffix, suffix_output)
 
     # Summary
     generate_combined_summary(cross_data, output_dir)

@@ -8,7 +8,7 @@ Generates publication-quality plots and summary tables for analyzing watermark r
 |---|---|
 | `__main__.py` | CLI dispatcher with subcommands: `robustness`, `robustness_quality`, `watermark_quality` |
 | `robustness.py` | Fixed vs context-dependent comparison for a single paraphraser (z-score bars, box plots, ROC curves, degradation analysis, scatter correlation) |
-| `robustness_quality.py` | Cross-paraphraser analysis combining detection and quality metrics (Pareto frontiers, heatmaps, quality-adjusted bars) |
+| `robustness_quality.py` | Cross-paraphraser analysis combining detection and quality metrics (Pareto frontiers, heatmaps, quality-adjusted bars, per-suffix tradeoff scatters) |
 | `watermark_quality.py` | Watermark quality vs detectability comparison without paraphrasing |
 | `utils.py` | Shared constants (colors, labels, metric definitions), data loading (`load_quality_csv`, `load_detection_results`, `load_z_scores`), and plot helpers (`setup_plot_style`, `save_figure`, `suffix_to_label`) |
 
@@ -31,7 +31,7 @@ Compares all four watermark methods (lsh, lsh_fixed, kmeans, kmeans_fixed) for o
 python -m visualization robustness_quality DATA_PATH --pattern '*-generated-*'
 ```
 
-Combines detection metrics (AUROC, z-score retention) with quality metrics (MAUVE, BERTScore, perplexity) across all paraphrasers. Generates Pareto frontier plots, annotated heatmaps, quality-adjusted bar charts, and a combined summary CSV.
+Combines detection metrics (AUROC, z-score retention) with quality metrics (MAUVE, BERTScore, perplexity) across all paraphrasers. Generates Pareto frontier plots, annotated heatmaps, quality-adjusted bar charts, per-suffix tradeoff scatters, and a combined summary CSV.
 
 - `--pattern`: Glob pattern for matching subdirectories (default: `*-generated-*`)
 - `--output`: Custom output directory (default: `{data_path}/figures/robustness_quality/`)
@@ -56,7 +56,7 @@ All figures are saved as both PNG (300 dpi) and PDF. Output goes to `{data_path}
 | Subcommand | Outputs |
 |---|---|
 | `robustness` | `zscore_comparison`, `distribution_boxplots`, `roc_curves`, `degradation_analysis`, `scatter_correlation`, `summary_metrics.csv` |
-| `robustness_quality` | `pareto_{group}_{metric}` (6 files), `quality_bars`, `heatmap_{group}` (2 files), `quality_comparison` (per-suffix), `combined_summary.csv` |
+| `robustness_quality` | `pareto_{group}_{metric}` (6 files), `quality_bars`, `heatmap_{group}` (2 files), `tradeoff_{metric}` (per-suffix, one per quality metric), `combined_summary.csv` |
 | `watermark_quality` | `watermark_quality`, `watermark_quality_summary.csv` |
 
 ## Prerequisites
