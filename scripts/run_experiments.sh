@@ -225,8 +225,17 @@ run_experiment() {
         # Run quality evaluation
         if [[ "${SKIP_QUALITY}" == false ]]; then
             echo ""
-            echo "=== QUALITY EVALUATION: ${mode} ==="
-            echo "Input: ${para_path}"
+            echo "=== QUALITY EVALUATION (watermarked): ${mode} ==="
+            echo "Input: ${para_path} [text column]"
+
+            CUDA_VISIBLE_DEVICES=${gpu} python -m quality "${para_path}" 512 \
+                --reference "${DATA_FOLDER}" \
+                --corpus "${QUALITY_CORPUS}" \
+                --column text
+
+            echo ""
+            echo "=== QUALITY EVALUATION (paraphrased): ${mode} ==="
+            echo "Input: ${para_path} [para_text column]"
 
             CUDA_VISIBLE_DEVICES=${gpu} python -m quality "${para_path}" 512 \
                 --reference "${DATA_FOLDER}" \
