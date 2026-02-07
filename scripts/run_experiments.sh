@@ -10,7 +10,7 @@
 
 # Default parameters
 CUDA_DEVICES="4,5,6,7"
-DATA_FOLDER="data/c4-val-1000"
+DATA_FOLDER="data/c4-val-10"
 LSH_DIM=3
 KMEANS_DIM=8
 CC_PATH="data/c4-train/cc.pt"
@@ -173,7 +173,7 @@ run_experiment() {
             echo "Found existing data in ${gen_path}, skipping sampling."
         else
             # Run sampling
-            CUDA_VISIBLE_DEVICES=${gpu} python -m sampling "${DATA_FOLDER}" \
+            HF_HUB_DISABLE_TELEMETRY=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=${gpu} python -m sampling "${DATA_FOLDER}" \
                 --sp_mode "${mode}" \
                 --sp_dim "${sp_dim}" \
                 --delta "${DELTA}" \
@@ -182,7 +182,33 @@ run_experiment() {
 
         echo "Sampling completed at: $(date)"
 
-        # Run paraphrase generation
+        # --- Watermark-only detection and quality ---
+        echo ""
+        echo "=== DETECTION (watermark-only): ${mode} ==="
+        echo "Input: ${gen_path}"
+
+        HF_HUB_DISABLE_TELEMETRY=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=${gpu} python -m detection "${gen_path}" \
+            --detection_mode "${detection_mode}" \
+            --sp_dim "${sp_dim}" \
+            --human_text "${HUMAN_TEXT}" \
+            ${extra_args}
+
+        echo "Watermark-only detection completed at: $(date)"
+
+        if [[ "${SKIP_QUALITY}" == false ]]; then
+            echo ""
+            echo "=== QUALITY EVALUATION (watermark-only): ${mode} ==="
+            echo "Input: ${gen_path} [text column]"
+
+            HF_HUB_DISABLE_TELEMETRY=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=${gpu} python -m quality "${gen_path}" 512 \
+                --reference "${DATA_FOLDER}" \
+                --corpus "${QUALITY_CORPUS}" \
+                --column text
+
+            echo "Watermark-only quality evaluation completed at: $(date)"
+        fi
+
+        # --- Paraphrasing ---
         echo ""
         echo "=== PARAPHRASING: ${mode} ==="
         echo "Input: ${gen_path}"
@@ -191,7 +217,7 @@ run_experiment() {
         if [[ "${PARAPHRASER}" == "custom" && -n "${CUSTOM_MODEL}" ]]; then
             para_args="${para_args} --custom_model ${CUSTOM_MODEL} --custom_prompt ${CUSTOM_PROMPT}"
         fi
-        CUDA_VISIBLE_DEVICES=${gpu} python -m paraphrasing "${gen_path}" ${para_args}
+        HF_HUB_DISABLE_TELEMETRY=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=${gpu} python -m paraphrasing "${gen_path}" ${para_args}
 
         echo "Paraphrasing completed at: $(date)"
 
@@ -200,7 +226,7 @@ run_experiment() {
             IS_BIGRAM="True"
         fi
 
-        # Run detection
+        # --- Paraphrased detection and quality ---
         local para_path
         if [[ "${PARAPHRASER}" == "custom" ]]; then
             local model_short="${CUSTOM_MODEL##*/}"
@@ -211,37 +237,27 @@ run_experiment() {
             para_path="${gen_path}-${PARAPHRASER}-bigram=${IS_BIGRAM}-threshold=0.0"
         fi
         echo ""
-        echo "=== DETECTION: ${mode} ==="
+        echo "=== DETECTION (paraphrased): ${mode} ==="
         echo "Input: ${para_path}"
 
-        CUDA_VISIBLE_DEVICES=${gpu} python -m detection "${para_path}" \
+        HF_HUB_DISABLE_TELEMETRY=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=${gpu} python -m detection "${para_path}" \
             --detection_mode "${detection_mode}" \
             --sp_dim "${sp_dim}" \
             --human_text "${HUMAN_TEXT}" \
             ${extra_args}
 
-        echo "Detection completed at: $(date)"
+        echo "Paraphrased detection completed at: $(date)"
 
-        # Run quality evaluation
         if [[ "${SKIP_QUALITY}" == false ]]; then
-            echo ""
-            echo "=== QUALITY EVALUATION (watermarked): ${mode} ==="
-            echo "Input: ${para_path} [text column]"
-
-            CUDA_VISIBLE_DEVICES=${gpu} python -m quality "${para_path}" 512 \
-                --reference "${DATA_FOLDER}" \
-                --corpus "${QUALITY_CORPUS}" \
-                --column text
-
             echo ""
             echo "=== QUALITY EVALUATION (paraphrased): ${mode} ==="
             echo "Input: ${para_path} [para_text column]"
 
-            CUDA_VISIBLE_DEVICES=${gpu} python -m quality "${para_path}" 512 \
+            HF_HUB_DISABLE_TELEMETRY=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=${gpu} python -m quality "${para_path}" 512 \
                 --reference "${DATA_FOLDER}" \
                 --corpus "${QUALITY_CORPUS}"
 
-            echo "Quality evaluation completed at: $(date)"
+            echo "Paraphrased quality evaluation completed at: $(date)"
         fi
 
         echo ""
@@ -397,27 +413,44 @@ echo ""
 # Print summary of results
 echo "Results summary:"
 for mode in "${TASK_MODES[@]}"; do
+    gen_path="${DATA_FOLDER}/${mode}-generated"
+
+    # Watermark-only results
+    wm_results="${gen_path}/results_wm.csv"
+    if [[ -f "$wm_results" ]]; then
+        echo ""
+        echo "=== ${mode} (watermark-only detection) ==="
+        cat "$wm_results"
+    fi
+    wm_quality="${gen_path}/eval_quality.csv"
+    if [[ -f "$wm_quality" ]]; then
+        echo "=== ${mode} (watermark-only quality) ==="
+        cat "$wm_quality"
+    fi
+
+    # Paraphrased results
     if [[ "${PARAPHRASER}" == "custom" ]]; then
         model_short="${CUSTOM_MODEL##*/}"
-        results_file="${DATA_FOLDER}/${mode}-generated-custom-${model_short}-${CUSTOM_PROMPT}/results.csv"
+        para_path="${gen_path}-custom-${model_short}-${CUSTOM_PROMPT}"
     elif [[ "${PARAPHRASER}" == "t5" || "${PARAPHRASER}" == "t5-bigram" ]]; then
         is_bigram="False"
         [[ "${PARAPHRASER}" == "t5-bigram" ]] && is_bigram="True"
-        results_file="${DATA_FOLDER}/${mode}-generated-t5-bigram=${is_bigram}-threshold=0.0/results.csv"
+        para_path="${gen_path}-t5-bigram=${is_bigram}-threshold=0.0"
     else
         is_bigram="False"
         [[ "${PARAPHRASER}" == *"bigram"* ]] && is_bigram="True"
-        results_file="${DATA_FOLDER}/${mode}-generated-${PARAPHRASER}-bigram=${is_bigram}-threshold=0.0/results.csv"
+        para_path="${gen_path}-${PARAPHRASER}-bigram=${is_bigram}-threshold=0.0"
     fi
-    if [[ -f "$results_file" ]]; then
+    para_results="${para_path}/results.csv"
+    if [[ -f "$para_results" ]]; then
         echo ""
-        echo "=== ${mode} (detection) ==="
-        cat "$results_file"
+        echo "=== ${mode} (paraphrased detection) ==="
+        cat "$para_results"
     fi
-    quality_file="$(dirname "$results_file")/eval_quality.csv"
-    if [[ -f "$quality_file" ]]; then
-        echo "=== ${mode} (quality) ==="
-        cat "$quality_file"
+    para_quality="${para_path}/eval_quality.csv"
+    if [[ -f "$para_quality" ]]; then
+        echo "=== ${mode} (paraphrased quality) ==="
+        cat "$para_quality"
     fi
 done
 
