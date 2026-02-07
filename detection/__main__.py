@@ -72,16 +72,26 @@ def run_detection(detect_fn, texts, desc):
 def save_results(args, z_scores, para_scores, human_scores, gens, paras):
     """Save detection results and compute metrics."""
     print("Saving scores...")
-    print(f"Average z-score of generations: {np.mean(z_scores):.3f}")
-    print(f"Average z-score of human texts: {np.mean(human_scores):.3f}")
-    print(f"Average z-score of paraphrased texts: {np.mean(para_scores):.3f}")
+    print(f"Average z-score of generations: {np.nanmean(z_scores):.3f}")
+    print(f"Average z-score of human texts: {np.nanmean(human_scores):.3f}")
+    print(f"Average z-score of paraphrased texts: {np.nanmean(para_scores):.3f}")
 
     np.save(os.path.join(args.dataset_path, "z_scores.npy"), z_scores)
     np.save(os.path.join(args.dataset_path, "para_z_scores.npy"), para_scores)
     np.save(os.path.join(args.dataset_path, "human_z_scores.npy"), human_scores)
 
-    print("Evaluating z-scores...")
-    auroc, fpr1, fpr5 = evaluate_z_scores(z_scores, para_scores, human_scores, args.dataset_path)
+    # Evaluate watermarked text detection (results_wm.csv)
+    print("Evaluating watermarked z-scores...")
+    wm_auroc, wm_fpr1, wm_fpr5 = evaluate_z_scores(z_scores, human_scores, args.dataset_path, suffix="_wm")
+    wm_metrics = [f"{wm_auroc:.3f}", f"{wm_fpr1:.3f}", f"{wm_fpr5:.3f}",
+                  f"{np.nanmean(z_scores):.3f}", f"{np.nanmean(human_scores):.3f}"]
+    wm_columns = ["auroc", "fpr1", "fpr5", "mean_z", "human_mean_z"]
+    df_wm = pd.DataFrame(data=[wm_metrics], columns=wm_columns)
+    df_wm.to_csv(os.path.join(args.dataset_path, "results_wm.csv"), sep="\t", index=False)
+
+    # Evaluate paraphrased text detection (results.csv)
+    print("Evaluating paraphrased z-scores...")
+    auroc, fpr1, fpr5 = evaluate_z_scores(para_scores, human_scores, args.dataset_path)
 
     print("Evaluating bert score...")
     gen_sents, para_sents = flatten_gens_and_paras(gens, paras)

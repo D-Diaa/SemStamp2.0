@@ -40,16 +40,6 @@ def flatten_gens_and_paras(gens, paras):
     return new_gens, new_paras
 
 
-def truncate_to_max_length(texts, max_length):
-    new_texts = []
-    for t in texts:
-        t = " ".join(t.split(" ")[:max_length])
-        if t[-1] not in sampling_utils.PUNCTS:
-            t = t + "."
-        new_texts.append(t)
-    return new_texts
-
-
 def compute_zscore(n_watermark, n_test_sent, lmbd):
     """Compute z-score from watermark count."""
     num = n_watermark - lmbd * n_test_sent
@@ -111,7 +101,7 @@ def get_roc_metrics(labels, preds):
     return fpr.tolist(), tpr.tolist(), float(roc_auc)
 
 
-def get_roc_metrics_from_zscores(m, mp, h, dataset_path):
+def get_roc_metrics_from_zscores(mp, h, dataset_path, suffix=""):
     mp = np.nan_to_num(mp)
     h = np.nan_to_num(h)
     len_z = len(mp)
@@ -121,17 +111,17 @@ def get_roc_metrics_from_zscores(m, mp, h, dataset_path):
     plt.ylabel("True Positive Rate")
     plt.xlabel("False Positive Rate")
     plt.title("ROC Curve")
-    name = os.path.join(dataset_path, "roc_curve.png")
+    name = os.path.join(dataset_path, f"roc_curve{suffix}.png")
     plt.savefig(name)
-    name = os.path.join(dataset_path, "fpr.npy")
+    plt.close()
+    name = os.path.join(dataset_path, f"fpr{suffix}.npy")
     np.save(name, mp_fpr)
-    name = os.path.join(dataset_path, "tpr.npy")
+    name = os.path.join(dataset_path, f"tpr{suffix}.npy")
     np.save(name, mp_tpr)
     return mp_area, mp_fpr
 
 
-def evaluate_z_scores(mz, mpz, hz, dataset_path):
-    mz = np.array(mz)
+def evaluate_z_scores(mpz, hz, dataset_path, suffix=""):
     mpz = np.array(mpz)
     hz = np.nan_to_num(np.array(hz))
     # Use quantiles from human z-scores to find thresholds
@@ -139,5 +129,5 @@ def evaluate_z_scores(mz, mpz, hz, dataset_path):
     # 95th percentile -> 5% of human texts above this threshold (FPR=5%)
     fpr_1_threshold = np.percentile(hz, 99)
     fpr_5_threshold = np.percentile(hz, 95)
-    mp_area, mp_fpr = get_roc_metrics_from_zscores(mz, mpz, hz, dataset_path)
+    mp_area, _ = get_roc_metrics_from_zscores(mpz, hz, dataset_path, suffix=suffix)
     return mp_area, len(mpz[mpz > fpr_1_threshold]) / len(mpz), len(mpz[mpz > fpr_5_threshold]) / len(mpz)
