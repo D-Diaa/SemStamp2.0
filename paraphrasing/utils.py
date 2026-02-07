@@ -7,11 +7,27 @@ import backoff
 import torch
 import re
 from tqdm import trange
-from detection.utils import run_bert_score
-
+from bert_score import score as bert_score_func
+from parrot import Parrot
 
 device = 'cuda' if torch.cuda.is_available() else "cpu"
-from parrot import Parrot
+
+
+def run_bert_score(gen_sents, para_sents, batch_size=32):
+    if not gen_sents or not para_sents:
+        return 0.0
+    filtered = [(g, p) for g, p in zip(gen_sents, para_sents) if g.strip() and p.strip()]
+    if not filtered:
+        return 0.0
+    gen_sents, para_sents = zip(*filtered)
+    P, R, F1 = bert_score_func(
+        gen_sents, para_sents,
+        model_type="roberta-large",
+        device=device,
+        lang="en",
+        batch_size=batch_size
+    )
+    return torch.mean(F1).item()
 # stops = set(stopwords.words('english'))
 stops = []
 
