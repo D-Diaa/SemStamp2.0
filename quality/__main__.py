@@ -77,7 +77,7 @@ if __name__ == '__main__':
     for k, v in results.items():
         print(f"{k}: {v:.4f}")
 
-    csv_name = "eval_quality_wm.csv" if args.column == "text" else "eval_quality.csv"
+    csv_name = "eval_quality.csv"
     csv_path = os.path.join(args.dataset_name, csv_name)
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=results.keys())

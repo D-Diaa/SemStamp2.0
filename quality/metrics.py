@@ -43,9 +43,19 @@ def run_mauve(gens, refs):
     return result.mauve
 
 
-def run_bertscore(gens, refs):
-    P, R, F1 = bert_score(gens, refs, lang="en", verbose=False)
-    return P.mean().item(), R.mean().item(), F1.mean().item()
+def run_bertscore(gens, refs, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            P, R, F1 = bert_score(gens, refs, lang="en", verbose=False)
+            return P.mean().item(), R.mean().item(), F1.mean().item()
+        except Exception as e:
+            if attempt < max_retries - 1:
+                import time
+                wait = 30 * (attempt + 1)
+                print(f"BERTScore attempt {attempt + 1} failed: {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
 
 
 def run_sem_ent(model, gens, tokenizer, ref_texts, args):

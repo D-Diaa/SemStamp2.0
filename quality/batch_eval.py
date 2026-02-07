@@ -26,8 +26,6 @@ def parse_args():
     parser.add_argument('--sem_ent_mode', type=str, default='last_token',
                         choices=['last_token', 'last_mean_pooling', 'all_mean_pooling'],
                         help='Embedding mode for semantic entropy (default: last_token)')
-    parser.add_argument('--pattern', type=str, default='*-generated-*',
-                        help='Glob pattern for matching dataset subdirectories (default: *-generated-*)')
     parser.add_argument('--force', action='store_true',
                         help='Re-evaluate even if eval_quality.csv already exists')
     args = parser.parse_args()
@@ -43,12 +41,20 @@ def parse_args():
 if __name__ == '__main__':
     args = parse_args()
 
-    # Find all generated dataset directories (exclude .pkl files and logs)
-    dataset_dirs = sorted(glob.glob(os.path.join(args.base_dir, args.pattern)))
-    dataset_dirs = [d for d in dataset_dirs if os.path.isdir(d) and "Figures" not in d]
+    # Find all generated dataset directories (exclude .pkl files, logs, figures)
+    all_dirs = sorted(glob.glob(os.path.join(args.base_dir, "*-generated*")))
+    all_dirs = [d for d in all_dirs if os.path.isdir(d) and "figures" not in d]
 
-    print(f"Found {len(dataset_dirs)} datasets:")
-    for d in dataset_dirs:
+    # Directories ending exactly in "-generated" are watermarked-only (evaluate "text")
+    # Directories with "-generated-*" are paraphrased (evaluate "para_text")
+    watermark_dirs = [d for d in all_dirs if os.path.basename(d).endswith("-generated")]
+    paraphrase_dirs = [d for d in all_dirs if not os.path.basename(d).endswith("-generated")]
+
+    print(f"Found {len(watermark_dirs)} watermarked datasets:")
+    for d in watermark_dirs:
+        print(f"  {os.path.basename(d)}")
+    print(f"Found {len(paraphrase_dirs)} paraphrased datasets:")
+    for d in paraphrase_dirs:
         print(f"  {os.path.basename(d)}")
 
     # Load model once
@@ -121,10 +127,10 @@ if __name__ == '__main__':
             writer.writerow(results)
         print(f"  Saved to {csv_path}")
 
-    for dataset_dir in dataset_dirs:
-        # Evaluate watermarked text quality
-        evaluate_and_save(dataset_dir, "text", "eval_quality_wm.csv")
-        # Evaluate paraphrased text quality
+    for dataset_dir in watermark_dirs:
+        evaluate_and_save(dataset_dir, "text", "eval_quality.csv")
+
+    for dataset_dir in paraphrase_dirs:
         evaluate_and_save(dataset_dir, "para_text", "eval_quality.csv")
 
     print("\nDone!")
