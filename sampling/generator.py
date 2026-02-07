@@ -138,7 +138,7 @@ def worker(rank, dataset_chunk, output_queue, args, device):
         ex['text'] = response.strip()
         return ex
 
-    processed_chunk = dataset_chunk.map(text_to_generated_text, batch_size=1)
+    processed_chunk = dataset_chunk.map(text_to_generated_text, batch_size=1, new_fingerprint=f"gen_{rank}")
     output_queue.put((processed_chunk, total_accepted, total_sentences))
 
 
