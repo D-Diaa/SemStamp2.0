@@ -30,6 +30,8 @@ def parse_args():
                         help='Path to directory with pre-computed k-means centroids and index (skips training)')
     parser.add_argument('--load_testgen_path', type=str, default=None,
                         help='Path to directory with pre-computed test generation embeddings (skips featurization)')
+    parser.add_argument('--column', type=str, default='para_text',
+                        help='Dataset column to evaluate (default: para_text)')
     args = parser.parse_args()
     if args.load_kmeans_path is None and args.corpus is None:
         parser.error('--corpus is required when --load_kmeans_path is not provided')
@@ -43,10 +45,12 @@ def parse_args():
 
 if __name__ == '__main__':
     args = parse_args()
-    gens = load_from_disk(args.dataset_name)['para_text']
+    gens = load_from_disk(args.dataset_name)[args.column]
     ref_texts = load_from_disk(args.reference)['text']
-    if args.corpus is not None:
+    if args.corpus is not None and args.load_kmeans_path is None:
         corpus_texts = load_from_disk(args.corpus)['text']
+    else:
+        corpus_texts = None
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     tokenizer.pad_token = tokenizer.eos_token
     pad_id = tokenizer.encode(tokenizer.eos_token)[0]
@@ -73,7 +77,8 @@ if __name__ == '__main__':
     for k, v in results.items():
         print(f"{k}: {v:.4f}")
 
-    csv_path = os.path.join(args.dataset_name, "eval_quality.csv")
+    csv_name = "eval_quality_wm.csv" if args.column == "text" else "eval_quality.csv"
+    csv_path = os.path.join(args.dataset_name, csv_name)
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=results.keys())
         writer.writeheader()

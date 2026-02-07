@@ -74,19 +74,25 @@ if __name__ == '__main__':
             self.sem_ent_mode = args.sem_ent_mode
             self.cluster_size = args.cluster_size
 
-    for dataset_dir in dataset_dirs:
+    def evaluate_and_save(dataset_dir, column, csv_filename):
+        """Evaluate a single column of a dataset and save results to CSV."""
         name = os.path.basename(dataset_dir)
-        csv_path = os.path.join(dataset_dir, "eval_quality.csv")
+        csv_path = os.path.join(dataset_dir, csv_filename)
         if not args.force and os.path.exists(csv_path):
             print(f"\n{'='*60}")
-            print(f"SKIPPING {name} (eval_quality.csv already exists)")
-            continue
+            print(f"SKIPPING {name} [{column}] ({csv_filename} already exists)")
+            return
 
         print(f"\n{'='*60}")
-        print(f"Evaluating: {name}")
+        print(f"Evaluating: {name} [{column}]")
         print(f"{'='*60}")
 
-        gens = load_from_disk(dataset_dir)["para_text"]
+        dataset = load_from_disk(dataset_dir)
+        if column not in dataset.column_names:
+            print(f"  SKIPPING: column '{column}' not found in dataset")
+            return
+
+        gens = dataset[column]
         eval_args = EvalArgs(dataset_dir)
 
         gen_ppl, bi_entro, tri_entro, rep_2, rep_3, rep_4, sem_ent, mauve_score, bert_P, bert_R, bert_F1 = \
@@ -114,5 +120,11 @@ if __name__ == '__main__':
             writer.writeheader()
             writer.writerow(results)
         print(f"  Saved to {csv_path}")
+
+    for dataset_dir in dataset_dirs:
+        # Evaluate watermarked text quality
+        evaluate_and_save(dataset_dir, "text", "eval_quality_wm.csv")
+        # Evaluate paraphrased text quality
+        evaluate_and_save(dataset_dir, "para_text", "eval_quality.csv")
 
     print("\nDone!")
