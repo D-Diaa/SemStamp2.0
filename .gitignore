@@ -4,3 +4,4 @@ semstamp-data/*
 __pycache__/*
 CLAUDE.md
 figures/*
+*/__pycache__/*
