@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import trange
 from datasets import load_from_disk
 from nltk.tokenize import sent_tokenize
-from sbert_lsh_model import SBERTLSHModel
+from sampling.sbert_lsh_model import SBERTLSHModel
 from sentence_transformers import SentenceTransformer
 from detection_utils import detect_kmeans, detect_lsh, run_bert_score, evaluate_z_scores, flatten_gens_and_paras
 

@@ -1,7 +1,7 @@
 from sklearn.metrics import roc_curve, auc
-import sampling_utils
-from sampling_lsh_utils import get_mask_from_seed
-from sampling_kmeans_utils import get_cluster_mask, get_cluster_id
+from sampling import utils as sampling_utils
+from sampling.lsh_utils import get_mask_from_seed
+from sampling.kmeans_utils import get_cluster_mask, get_cluster_id
 import numpy as np
 import torch
 from bert_score import score as bert_score_func

@@ -17,7 +17,7 @@ def batched(iterable, n, total=None):
         assert l == total
     for ndx in range(0, l, n):
         yield iterable[ndx:min(ndx + n, l)]
-    
+
 
 class LSHModel:
     def __init__(self, device, batch_size, lsh_dim):

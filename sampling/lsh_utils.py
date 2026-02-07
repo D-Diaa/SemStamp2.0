@@ -1,4 +1,4 @@
-import sampling_utils
+from sampling import utils as sampling_utils
 import torch
 import torch.nn.functional as F
 

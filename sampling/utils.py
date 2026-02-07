@@ -21,6 +21,3 @@ def extract_prompt_from_text(text, len_prompt):
     # select first (sub)sentence, deliminated by any of PUNCTS
     prompt = list(sorted(prompts, key=lambda x: len(x)))[0]
     return prompt
-
-
-

@@ -8,7 +8,7 @@ import numpy as np
 import pickle
 from tqdm import tqdm
 from kmeans_pytorch import *  # maybe faiss
-import sampling_utils
+from sampling import utils as sampling_utils
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 rng = torch.Generator(device)
@@ -30,7 +30,7 @@ def kmeans_predict(
     :return: (torch.tensor) cluster ids
     """
     # print(f'predicting on {device}..')
-    
+
     if distance == 'cosine':
         pairwise_distance_function = pairwise_cosine
     else:

@@ -160,7 +160,7 @@ run_experiment() {
             echo "Found existing data in ${gen_path}, skipping sampling."
         else
             # Run sampling
-            CUDA_VISIBLE_DEVICES=${gpu} python sampling.py "${DATA_FOLDER}" \
+            CUDA_VISIBLE_DEVICES=${gpu} python -m sampling "${DATA_FOLDER}" \
                 --sp_mode "${mode}" \
                 --sp_dim "${sp_dim}" \
                 --delta "${DELTA}" \
