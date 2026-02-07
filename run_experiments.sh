@@ -9,8 +9,8 @@
 # Don't use set -e as it breaks the process monitoring logic
 
 # Default parameters
-CUDA_DEVICES="4"
-DATA_FOLDER="data/c4-val-250"
+CUDA_DEVICES="4,5,6,7"
+DATA_FOLDER="data/c4-val-1000"
 LSH_DIM=3
 KMEANS_DIM=8
 CC_PATH="data/c4-train/cc.pt"
@@ -19,7 +19,7 @@ HUMAN_TEXT="data/c4-human"
 PARAPHRASER="custom"
 PARA_BSZ=32
 CUSTOM_MODEL="DDiaa/WM-Removal-Unigram-Qwen2.5-3B"
-CUSTOM_PROMPT="combine"
+CUSTOM_PROMPT="standard"
 FORCE_SAMPLE=false
 
 # Parse command line arguments
@@ -174,9 +174,9 @@ run_experiment() {
         echo "=== PARAPHRASING: ${mode} ==="
         echo "Input: ${gen_path}"
 
-        local para_args="--paraphraser ${PARAPHRASER}"
-        if [[ -n "${CUSTOM_MODEL}" ]]; then
-            para_args="${para_args} --custom_model ${CUSTOM_MODEL} --custom_prompt ${CUSTOM_PROMPT} --bsz ${PARA_BSZ}"
+        local para_args="--paraphraser ${PARAPHRASER} --bsz ${PARA_BSZ}"
+        if [[ "${PARAPHRASER}" == "custom" && -n "${CUSTOM_MODEL}" ]]; then
+            para_args="${para_args} --custom_model ${CUSTOM_MODEL} --custom_prompt ${CUSTOM_PROMPT}"
         fi
         CUDA_VISIBLE_DEVICES=${gpu} python paraphrase_gen.py "${gen_path}" ${para_args}
 
@@ -192,6 +192,8 @@ run_experiment() {
         if [[ "${PARAPHRASER}" == "custom" ]]; then
             local model_short="${CUSTOM_MODEL##*/}"
             para_path="${gen_path}-custom-${model_short}-${CUSTOM_PROMPT}"
+        elif [[ "${PARAPHRASER}" == "t5" || "${PARAPHRASER}" == "t5-bigram" ]]; then
+            para_path="${gen_path}-t5-bigram=${IS_BIGRAM}-threshold=0.0"
         else
             para_path="${gen_path}-${PARAPHRASER}-bigram=${IS_BIGRAM}-threshold=0.0"
         fi
@@ -362,6 +364,10 @@ for mode in "${TASK_MODES[@]}"; do
     if [[ "${PARAPHRASER}" == "custom" ]]; then
         model_short="${CUSTOM_MODEL##*/}"
         results_file="${DATA_FOLDER}/${mode}-generated-custom-${model_short}-${CUSTOM_PROMPT}/results.csv"
+    elif [[ "${PARAPHRASER}" == "t5" || "${PARAPHRASER}" == "t5-bigram" ]]; then
+        is_bigram="False"
+        [[ "${PARAPHRASER}" == "t5-bigram" ]] && is_bigram="True"
+        results_file="${DATA_FOLDER}/${mode}-generated-t5-bigram=${is_bigram}-threshold=0.0/results.csv"
     else
         is_bigram="False"
         [[ "${PARAPHRASER}" == *"bigram"* ]] && is_bigram="True"

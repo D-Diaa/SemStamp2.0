@@ -10,6 +10,7 @@ import openai
 import pickle
 from transformers import AutoTokenizer
 from paraphrase_gen_utils import accept_by_bigram_overlap, SParrot, query_openai, query_openai_bigram, gen_prompt, gen_bigram_prompt, extract_list
+from transformers import AutoModelForSeq2SeqLM
 from nltk.tokenize import sent_tokenize
 from string import punctuation
 from itertools import groupby
@@ -140,6 +141,67 @@ def paraphrase_openai(client, texts, num_beams, bigram=False):
     Dataset.from_dict({'text': new_texts, 'para_text': all_paras}).save_to_disk(save_path)
     return new_texts, all_paras
 
+def t5_paraphrase(texts, tokenizer, bigram=False, num_beams=10, bert_threshold=0.03, bsz=1, device='cuda'):
+    """Paraphrase using humarin/chatgpt_paraphraser_on_T5_base model."""
+    model_tag = "humarin/chatgpt_paraphraser_on_T5_base"
+    t5_tokenizer = AutoTokenizer.from_pretrained(model_tag)
+    t5_model = AutoModelForSeq2SeqLM.from_pretrained(model_tag).to(device)
+    t5_model.eval()
+
+    sents, data_len = [], []
+    for text in tqdm(texts, desc="Tokenizing"):
+        sent_list = sent_tokenize(text)
+        sents.extend(sent_list)
+        data_len.append(len(sent_list))
+
+    paras = []
+    total_paraphrased = []
+    batched_sents = [sents[i:i + bsz] for i in range(0, len(sents), bsz)]
+    for batch in tqdm(batched_sents, desc="Paraphrasing with T5"):
+        prefixed = [f"paraphrase: {s}" for s in batch]
+        inputs = t5_tokenizer(
+            prefixed, return_tensors="pt", padding="longest",
+            max_length=128, truncation=True,
+        ).to(device)
+        with torch.no_grad():
+            outputs = t5_model.generate(
+                **inputs,
+                temperature=0.7,
+                repetition_penalty=10.0,
+                num_return_sequences=num_beams,
+                no_repeat_ngram_size=2,
+                num_beams=num_beams,
+                num_beam_groups=num_beams,
+                max_length=128,
+                diversity_penalty=3.0,
+            )
+        all_decoded = t5_tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        for i, sent in enumerate(batch):
+            start = i * num_beams
+            end = start + num_beams
+            paraphrased = [well_formed_sentence(p, end_sent=True) for p in all_decoded[start:end]]
+            total_paraphrased.append(paraphrased)
+            if bigram:
+                para = accept_by_bigram_overlap(sent, paraphrased, tokenizer, bert_threshold=bert_threshold)
+            else:
+                para = paraphrased[0]
+            paras.append(para)
+
+    output = []
+    start_pos = 0
+    for l in data_len:
+        output.append(" ".join(paras[start_pos: start_pos + l]))
+        start_pos += l
+
+    new_dataset = Dataset.from_dict({'text': texts, 'para_text': output})
+    name = args.data_path + f'-t5-bigram={bigram}-threshold={bert_threshold}'
+    new_dataset.save_to_disk(name)
+    pkl_name = args.data_path + f'-t5-bigram={bigram}-threshold={bert_threshold}-all_beams.pkl'
+    with open(pkl_name, 'wb') as f:
+        pickle.dump(total_paraphrased, f)
+    return output
+
+
 STANDARD_PROMPT = (
     "You are an expert copy-editor. Please rewrite the following text in your own voice and paraphrase all sentences.\n"
     "Ensure that the final output contains the same information as the original text and has roughly the same length.\n"
@@ -246,6 +308,8 @@ if __name__ == '__main__':
                                                     'openai',
                                                     'parrot-bigram',
                                                     'openai-bigram',
+                                                    't5',
+                                                    't5-bigram',
                                                     'custom'])
     parser.add_argument('--custom_model', type=str, default=None,
                         help='HuggingFace model path for custom paraphraser (PEFT/LoRA adapter)')
@@ -285,6 +349,12 @@ if __name__ == '__main__':
             api_key=os.getenv('OPENAI_API_KEY')
         )
         new_texts, paras = paraphrase_openai(client, texts, args.num_beams, bigram=True)
+    elif args.paraphraser == 't5':
+        t5_paraphrase(texts, tokenizer, num_beams=args.num_beams,
+                       bert_threshold=args.bert_threshold, bsz=batch_size, device=device)
+    elif args.paraphraser == 't5-bigram':
+        t5_paraphrase(texts, tokenizer, bigram=True, num_beams=args.num_beams,
+                       bert_threshold=args.bert_threshold, bsz=batch_size, device=device)
     elif args.paraphraser == 'custom':
         assert args.custom_model is not None, "--custom_model is required when using --paraphraser custom"
         custom_paraphrase(texts, args.custom_model, device=device, bsz=batch_size, custom_prompt=args.custom_prompt)
