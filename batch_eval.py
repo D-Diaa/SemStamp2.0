@@ -2,7 +2,7 @@ import os
 import glob
 from datasets import load_from_disk
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from .eval_quality import eval_quality
+from quality.eval_quality import eval_quality
 import csv
 import argparse
 
@@ -34,7 +34,9 @@ def parse_args():
     if args.reference is None:
         args.reference = args.base_dir
     if args.load_kmeans_path is None:
-        args.load_kmeans_path = args.corpus
+        corpus_files = os.listdir(args.corpus)
+        if any(f.endswith('.pkl') for f in corpus_files):
+            args.load_kmeans_path = args.corpus
     return args
 
 
@@ -43,7 +45,7 @@ if __name__ == '__main__':
 
     # Find all generated dataset directories (exclude .pkl files and logs)
     dataset_dirs = sorted(glob.glob(os.path.join(args.base_dir, args.pattern)))
-    dataset_dirs = [d for d in dataset_dirs if os.path.isdir(d)]
+    dataset_dirs = [d for d in dataset_dirs if os.path.isdir(d) and "Figures" not in d]
 
     print(f"Found {len(dataset_dirs)} datasets:")
     for d in dataset_dirs:
@@ -84,7 +86,7 @@ if __name__ == '__main__':
         print(f"Evaluating: {name}")
         print(f"{'='*60}")
 
-        gens = load_from_disk(dataset_dir)["text"]
+        gens = load_from_disk(dataset_dir)["para_text"]
         eval_args = EvalArgs(dataset_dir)
 
         gen_ppl, bi_entro, tri_entro, rep_2, rep_3, rep_4, sem_ent, mauve_score, bert_P, bert_R, bert_F1 = \

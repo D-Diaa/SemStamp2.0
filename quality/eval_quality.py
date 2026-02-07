@@ -3,7 +3,7 @@ import csv
 from datasets import load_from_disk
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from .eval_clm import eval_perplexity, text_entropy, rep_ngram
+from .utils import eval_perplexity, text_entropy, rep_ngram
 from collections import Counter
 import os
 import faiss
@@ -196,7 +196,7 @@ def parse_args():
 
 if __name__ == '__main__':
     args = parse_args()
-    gens = load_from_disk(args.dataset_name)['text']
+    gens = load_from_disk(args.dataset_name)['para_text']
     ref_texts = load_from_disk(args.reference)['text']
     if args.corpus is not None:
         corpus_texts = load_from_disk(args.corpus)['text']
