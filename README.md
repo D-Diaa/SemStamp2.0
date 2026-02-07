@@ -1,23 +1,197 @@
-# Official Repo for SemStamp (NAACL24) and k-SemStamp (ACL24)
+# SemStamp 2.0
 
-## Updates (Dec 7 2024)
-1. SemStamp and k-SemStamp now both support multi-GPU implementations.
-2. Added more instructions to clarify usage
-3. Integrated data repository with the original data from the paper.
+An extended reimplementation of [SemStamp](https://arxiv.org/abs/2310.03991) (NAACL'24) and [k-SemStamp](https://arxiv.org/abs/2402.11399) (ACL'24) — semantic watermarking for LLM-generated text.
 
-To cite
+This fork restructures the original codebase into a modular pipeline, adds fixed-context watermark modes, integrates custom paraphrasers (including fine-tuned LoRA attackers), and provides end-to-end experiment orchestration with quality evaluation and visualization.
+
+**Author:** [Abdulrahman Diaa](https://github.com/D-Diaa)
+
+## What's New in This Fork
+
+- **Fixed-context modes** (`lsh_fixed`, `kmeans_fixed`) — watermark derived from a secret message instead of previous-sentence context, making it significantly more robust to paraphrasing attacks
+- **Modular pipeline** — each stage (sampling, detection, paraphrasing, quality, visualization) is a self-contained Python package runnable via `python -m <package>`
+- **Custom paraphrasers** — plug in any HuggingFace model (including PEFT/LoRA) as a paraphrasing attacker, with multiple prompt strategies (`standard`, `shuffle`, `combine`)
+- **Quality evaluation suite** — perplexity, n-gram entropy/repetition, semantic entropy, MAUVE, and BERTScore in one pass
+- **Visualization** — robustness comparisons, Pareto frontiers, heatmaps, and watermark quality analysis
+- **Multi-GPU pipeline script** — `run_experiments.sh` distributes modes across GPUs and runs the full pipeline automatically
+- **Batch evaluation** — evaluate quality across all generated/paraphrased variants in one command
+
+## How SemStamp Works
+
+**Generation:** For each sentence, hash the previous sentence's embedding (or a secret message in fixed mode) to derive a valid partition mask over the embedding space. Rejection-sample candidate sentences until one lands in a valid partition.
+
+**Detection:** Tokenize into sentences, check what fraction land in valid partitions, and compute a z-score: `z = (hits - λn) / sqrt(nλ(1-λ))`. Compare watermarked vs. human text via AUROC and FPR thresholds.
+
+Two partitioning strategies:
+
+- **LSH** (`lsh` / `lsh_fixed`) — Locality-Sensitive Hashing with random hyperplanes (`sp_dim=3`)
+- **K-Means** (`kmeans` / `kmeans_fixed`) — clustering-based partitioning (`sp_dim=8`)
+
+## Installation
+
+```bash
+git clone --recurse-submodules https://github.com/D-Diaa/SemStamp2.0.git
+cd SemStamp2.0
+pip install -r requirements.txt
+python scripts/install_punkt.py  # MANDATORY — NLTK sentence tokenizer
 ```
+
+Requires a CUDA-capable GPU. Check availability with `gpustat` and set `CUDA_VISIBLE_DEVICES` accordingly.
+
+## Quick Start
+
+### 1. Prepare Data
+
+```bash
+python scripts/load_c4.py --k 20000          # download C4 dataset
+python scripts/build_subset.py data/c4-val --n 1000  # create evaluation subset
+```
+
+### 2. Generate Watermarked Text
+
+```bash
+python -m sampling data/c4-val-1000 \
+    --sp_mode lsh --sp_dim 3 --delta 0.02 \
+    --model AbeHou/opt-1.3b-semstamp \
+    --embedder AbeHou/SemStamp-c4-sbert
+```
+
+For k-means mode, first compute cluster centers, then generate:
+
+```bash
+python -m sampling.kmeans_utils data/c4-train AbeHou/SemStamp-c4-sbert 8
+python -m sampling data/c4-val-1000 \
+    --sp_mode kmeans --sp_dim 8 --delta 0.02 \
+    --model AbeHou/opt-1.3b-semstamp \
+    --embedder AbeHou/SemStamp-c4-sbert \
+    --cc_path data/c4-train/cc.pt
+```
+
+### 3. Detect Watermark
+
+```bash
+python -m detection data/c4-val-1000/lsh-generated \
+    --detection_mode lsh --sp_dim 3 \
+    --embedder AbeHou/SemStamp-c4-sbert \
+    --human_text data/c4-human
+```
+
+### 4. Attack with Paraphrasing
+
+```bash
+python -m paraphrasing data/c4-val-1000/lsh-generated \
+    --paraphraser custom \
+    --custom_model DDiaa/WM-Removal-Unigram-Qwen2.5-3B \
+    --custom_prompt combine --bsz 32
+```
+
+### 5. Evaluate Quality
+
+```bash
+python -m quality data/c4-val-1000/lsh-generated 205 \
+    --reference data/c4-val-1000 \
+    --corpus data/c4-train
+```
+
+### 6. Visualize Results
+
+```bash
+python -m visualization robustness data/c4-val-1000 --suffix=SUFFIX
+python -m visualization robustness_quality data/c4-val-1000 --pattern '*-generated-*'
+python -m visualization watermark_quality data/c4-val-1000
+```
+
+## Full Pipeline
+
+Run everything end-to-end across multiple GPUs:
+
+```bash
+bash scripts/run_experiments.sh \
+    --gpus 4,5,6,7 \
+    --data data/c4-val-1000 \
+    --modes lsh,lsh_fixed,kmeans,kmeans_fixed \
+    --paraphrasers custom \
+    --custom-models "DDiaa/WM-Removal-Unigram-Qwen2.5-3B" \
+    --custom-prompts standard
+```
+
+This distributes one watermark mode per GPU and runs: sampling → detection → quality → paraphrasing → detection → quality → visualization. Logs go to `{data}/logs/{mode}.log`.
+
+## Project Structure
+
+```
+sampling/           Watermarked text generation via rejection sampling
+detection/          Z-score based watermark detection
+paraphrasing/       Paraphrasing attack implementations
+quality/            Text quality evaluation metrics
+visualization/      Result analysis and plotting
+training/           Sentence embedder fine-tuning (contrastive learning)
+scripts/            Utility scripts and experiment runner
+centroids/          Pre-computed k-means cluster centers
+semstamp-data/      Original paper data (git submodule)
+```
+
+Each package has its own README with detailed documentation. See [sampling/](sampling/), [detection/](detection/), [quality/](quality/), and [visualization/](visualization/).
+
+## Key Arguments
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `--sp_mode` | — | Watermark mode: `lsh`, `lsh_fixed`, `kmeans`, `kmeans_fixed` |
+| `--sp_dim` | — | Partition dimensions (3 for LSH, 8 for k-means) |
+| `--delta` | `0` | Rejection threshold (higher = more robust, slower) |
+| `--lmbd` | `0.25` | Fraction of valid partitions |
+| `--batch_size` | `16` | Candidates per rejection step |
+| `--max_new_tokens` | `205` | Max tokens to generate |
+| `--secret_message` | `"The magic words are squeamish ossifrage."` | Secret for fixed modes |
+| `--cc_path` | — | Path to cluster centers (k-means modes) |
+| `--embedder` | — | Sentence embedder model |
+| `--paraphraser` | — | Paraphraser type: `parrot`, `t5`, `openai`, `custom` |
+
+## Pre-trained Resources
+
+| Resource | Description |
+| --- | --- |
+| `AbeHou/opt-1.3b-semstamp` | OPT-1.3B fine-tuned for shorter sentences |
+| `AbeHou/SemStamp-c4-sbert` | Sentence embedder fine-tuned on C4 |
+| `AbeHou/SemStamp-booksum-sbert` | Sentence embedder fine-tuned on BookSum |
+| `DDiaa/WM-Removal-Unigram-Qwen2.5-3B` | Custom paraphraser for watermark removal |
+
+Any HuggingFace causal LM (OPT, LLaMA, GPT-2, Mistral, Qwen, etc.) works for generation.
+
+## Important Notes
+
+- **GPU consistency:** Detection must run on the same GPU type as generation (LSH random seeds are device-dependent)
+- **NLTK punkt:** Run `scripts/install_punkt.py` before any generation or detection
+- **K-means modes:** Require pre-computed cluster centers via `--cc_path`
+
+## Reproducing Paper Results
+
+The original paper data is included as a git submodule in `semstamp-data/`. To reproduce detection results:
+
+```bash
+# SemStamp (LSH)
+python -m detection semstamp-data/c4-semstamp-pegasus-parrot/semstamp-pegasus-bigram=False \
+    --detection_mode lsh --sp_dim 3 \
+    --embedder AbeHou/SemStamp-c4-sbert \
+    --human_text semstamp-data/original-c4-texts
+
+# k-SemStamp (K-Means)
+python -m detection semstamp-data/c4-ksemstamp-pegasus/bigram=False \
+    --detection_mode kmeans --sp_dim 8 \
+    --embedder AbeHou/SemStamp-c4-sbert \
+    --cc_path centroids/c4-cluster_8_centers.pt \
+    --human_text semstamp-data/original-c4-texts
+```
+
+## Citations
+
+```bibtex
 @inproceedings{hou-etal-2023-semstamp,
     title = "SemStamp: A Semantic Watermark with Paraphrastic Robustness for Text Generation",
-    author = "Hou, Abe Bohan*  and
-      Zhang, Jingyu*  and
-      He, Tianxing*  and
-      Chuang, Yung-Sung  and
-      Wang, Hongwei  and
-      Shen, Lingfeng and
-      Van Durme, Benjamin and
-      Khashabi, Daniel  and
-      Tsvetkov, Yulia",
+    author = "Hou, Abe Bohan and Zhang, Jingyu and He, Tianxing and
+              Chuang, Yung-Sung and Wang, Hongwei and Shen, Lingfeng and
+              Van Durme, Benjamin and Khashabi, Daniel and Tsvetkov, Yulia",
     booktitle = "Annual Conference of the North American Chapter of the Association for Computational Linguistics",
     year = "2023",
     url = "https://arxiv.org/abs/2310.03991",
@@ -25,144 +199,13 @@ To cite
 
 @inproceedings{hou-etal-2024-k,
     title = "k-{S}em{S}tamp: A Clustering-Based Semantic Watermark for Detection of Machine-Generated Text",
-    author = "Hou, Abe  and
-      Zhang, Jingyu  and
-      Wang, Yichen  and
-      Khashabi, Daniel  and
-      He, Tianxing",
-    editor = "Ku, Lun-Wei  and
-      Martins, Andre  and
-      Srikumar, Vivek",
+    author = "Hou, Abe and Zhang, Jingyu and Wang, Yichen and Khashabi, Daniel and He, Tianxing",
     booktitle = "Findings of the Association for Computational Linguistics: ACL 2024",
     month = aug,
     year = "2024",
-    address = "Bangkok, Thailand",
     publisher = "Association for Computational Linguistics",
     url = "https://aclanthology.org/2024.findings-acl.98",
     doi = "10.18653/v1/2024.findings-acl.98",
     pages = "1706--1715",
 }
-
 ```
-
-## Installation
-Recursive clone:
-```
-git clone --recurse-submodules https://github.com/bohanhou14/SemStamp.git
-```
-(Recommended) create a virtual environment, and then:
-```
-pip install -r requirements.txt
-```
-
-(MANDATORY) install punkt
-```
-python install_punkt.py
-```
-
-
-## SemStamp and k-SemStamp
-
-This is the repo for [SemStamp: A Semantic Watermark with Paraphrastic Robustness for Text Generation](https://arxiv.org/abs/2310.03991) (Accepted to NAACL 24) and [k-SemStamp: A Clustering-Based Semantic Watermark for Detection of Machine-Generated Text](https://arxiv.org/abs/2402.11399) (Accepted to ACL 24).
-
-SemStamp is a semantic watermark on Large Language Model(LLM) text generations to allow generated texts to be detected. SemStamp utilizes Locality-Sensitive Hashing (LSH) to partition the high-dimensional embedding space to produce sentence generations with LSH-hashes that follow a pseudo-randomly controlled sequence. During detection time, the algorithm analyzes the LSH-hashes of input sentences to see if they constitute a pseudo-random sequence, subsequently applying a z-test on the pseudo-randomness to determine if the text is watermarked. k-SemStamp is a simple yet effective variant of SemStamp, which has a similar setup but uses k-means clustering to partition the embedding space.
-
-## Reproduce paper results
-For instance, the pegasus results:
-```
-1. load human subset
-python load_c4.py
-2. (MUST be in GPU environment), for example:
-python detection.py semstamp-data/c4-semstamp-pegasus-parrot/semstamp-pegasus-bigram=False --detection_mode lsh --sp_dim 3 --embedder AbeHou/SemStamp-c4-sbert --human_text semstamp-data/original-c4-texts 
-
-python detection.py semstamp-data/c4-semstamp-pegasus-parrot/semstamp-pegasus-bigram=True --detection_mode lsh --sp_dim 3 --embedder AbeHou/SemStamp-c4-sbert --human_text semstamp-data/original-c4-texts 
-
-python detection.py semstamp-data/c4-ksemstamp-pegasus/bigram=False --detection_mode kmeans --sp_dim 8 --embedder AbeHou/SemStamp-c4-sbert --cc_path centroids/c4-cluster_8_centers.pt --human_text semstamp-data/original-c4-texts
-3. Feel free to run detections on other data from semstamp-data
-```
-
-## Custom Generations
-Please read the following guides.
-
-## SemStamp 
-The high-level pipeline of SemStamp is outlined below
-### Generation
-1. Fine-tune a robust sentence embedder that encodes semantically similar sentences with sentence embeddings having high cosine similarities.
-2. LSH partitions the embedding space through fixing random hyperplanes and assigning signatures of a vector based on the signs of its dot product with the hyperplanes.
-3. Given input sentence $s_1$, repeat generating sentences $s_t$ until $LSH(s_t) \in valid(s_{t-1})$, $t=2,...$ and stop when the max_new_tokens is reached. The valid mask is controlled by the LSH signature of $s_{t-1}$.
-### Detection
-1. Attempt to remove sentence watermark through sentence-level paraphrasing.
-2. Detect the sentences to see if $LSH(s_t) \in valid(s_{t-1})$, $t=2,...$
-### Sample usage
-1. create data/ directory and load c4_data, which would also create the human subset for evaluation: 
-
-```python load_c4.py```
-2. (Optional) fine-tune the sentence embedder or use a fine-tuned sentence embedder at AbeHou/SemStamp-booksum-sbert and AbeHou/SemStamp-c4-sbert
-- fine-tune procedure: 
-```
-# 1. build a smaller-sized huggingface dataset of c4-train dataset with 'text' column (recommended size: 8k) and use the .save_to_disk() API
-python build_subset.py data/c4-train --n 8000
-# 2. paraphrase
-python paraphrase_gen.py data/c4-train-8000
-# 3. fine-tune
-python finetune_embedder.py --model_name_or_path all-mpnet-base-v2 \
-  --dataset_path data/c4-train-8000-pegasus-bigram=False-threshold=0.0 \
-  --output_dir $OUTPUT_DIR --learning_rate 4e-5 --warmup_steps 50 \
-  --max_seq_length 64 --num_train_epochs 3 --logging_steps 10 \
-  --evaluation_strategy epoch --save_strategy epoch \
-  --remove_unused_columns False --delta 0.8 --do_train --overwrite_output_dir
-```
-
-3. produce SemStamp generations:
-```
-# 1. build a smaller-sized hugginface dataset of c4-val dataset with 'text' column (e.g. 1k texts) and use the .save_to_disk() API
-python build_subset.py data/c4-val --n 1000
-# 2. sample
-python sampling.py data/c4-val-1000 --model AbeHou/opt-1.3b-semstamp \
-    --embedder OUTPUT_DIR_TO_YOUR_EMBEDDER --sp_mode lsh \
-    --sp_dim 3 --delta 0.02
-
-# note: it's recommended to use AbeHou/opt-1.3b-semstamp, which is fine-tuned with cross-entropy loss 
-# to favor generations of shorter average sentence length, 
-# so that the effect of watermarks is more pronounced.
-# 3. paraphrase
-python paraphrase_gen.py PATH_TO_GENERATED_DATA --model_path AbeHou/opt-1.3b-semstamp
-# 4. detection
-python detection.py PATH_TO_PARAPHRASED_DATA --detection_mode lsh --sp_dim 3 --embedder OUTPUT_DIR_TO_YOUR_EMBEDDER
-```
-**Note that if you use GPU to generate, you must use GPU to detect as well in order for the random seed to be consistent.**
-Note that you are free to change the value of delta for your customized tradeoff of robustness and speed. (Higher delta means more strict rejections, thus more robust and slower. Lower delta is the other way around.)
-
-## k-SemStamp Generation
-1. Encode a corpus of texts belonging to a specific domain and obtain k-means clusters on the training embeddings
-2. Given input sentence $s_1$, repeat generating sentences $s_t$ until $c(s_t) \in valid(s_{t-1})$, $t=2,...$ and stop when the max_new_tokens is reached. $c(s_t)$ returns the index of the closest cluster to $s_{t}$. The valid mask is controlled by $c(s_{t-1})$.
-### Detection
-The detection procedure is analogous to SemStamp except that $c(s_t)$ is used instead of $LSH(s_t)$
-### Sample usage
-Steps 1 and 2 are the same.
-
-3. generate sentence embeddings to train kmeans clusters (multi-GPU supported).
-  ```
-  python sampling_kmeans_utils.py data/c4-train AbeHou/SemStamp-c4-sbert 8
-  ```
-
-4. produce k-SemStamp generations. 
-  ```python build_subset.py data/c4-val --n 1000 
-  python sampling.py data/c4-val-1000 --model AbeHou/opt-1.3b-semstamp --embedder AbeHou/SemStamp-c4-sbert --sp_mode kmeans --sp_dim 8 --delta 0.02 \
-    --cc_path data/c4-train/cc.pt
-  ```
-
-5. detection:
-  ```
-  python detection.py path_to_your_generation --detection_mode kmeans --sp_dim 8 --embedder output_dir_to_your_embedder --cc_path to_your_kmeans_clusters
-  ```
-  Example usage to replicate results in k-SemStamp paper:
-  ```
-  python detection.py semstamp-data/c4-ksemstamp-pegasus/bigram=False --detection_mode kmeans --sp_dim 8 --embedder AbeHou/SemStamp-c4-sbert --cc_path centroids/c4-cluster_8_centers.pt
-  ```
-    
-
-
-
-
-
