@@ -3,8 +3,8 @@ Visualization script for comparing watermark robustness with fixed vs context-de
 Generates publication-quality figures from detection results.
 
 Usage:
-    python visualize_fixed_comparison.py data/c4-val-250
-    python visualize_fixed_comparison.py data/c4-val-250 --output figures/
+    python -m visualization data/c4-val-250
+    python -m visualization data/c4-val-250 --output figures/
 """
 
 import argparse

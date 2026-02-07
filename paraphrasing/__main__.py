@@ -9,7 +9,7 @@ import torch
 import openai
 import pickle
 from transformers import AutoTokenizer
-from paraphrase_gen_utils import accept_by_bigram_overlap, SParrot, query_openai, query_openai_bigram, gen_prompt, gen_bigram_prompt, extract_list
+from paraphrasing.utils import accept_by_bigram_overlap, SParrot, query_openai, query_openai_bigram, gen_prompt, gen_bigram_prompt, extract_list
 from transformers import AutoModelForSeq2SeqLM
 from nltk.tokenize import sent_tokenize
 from string import punctuation
@@ -93,7 +93,7 @@ def parrot_paraphrase(parrot, texts, tokenizer, num_beams=10, bigram=False, save
         for l in data_len:
             output.append(" ".join(paras[start_pos: start_pos+l]))
             start_pos += l
-    new_dataset = Dataset.from_dict({'text': new_texts, 'para_text': output})   
+    new_dataset = Dataset.from_dict({'text': new_texts, 'para_text': output})
     name = args.data_path + \
         f'-parrot-bigram={bigram}-threshold={bert_threshold}'
     new_dataset.save_to_disk(name)
@@ -127,7 +127,7 @@ def paraphrase_openai(client, texts, num_beams, bigram=False):
                     # openai refuses to paraphrase, thendiscard
                 if num_iter <= MAX_ITER:
                     para_sents.append(para_ls)
-                else: 
+                else:
                     fail = True
             else:
                 prompt = gen_prompt(sent, context)
@@ -135,8 +135,8 @@ def paraphrase_openai(client, texts, num_beams, bigram=False):
                 para_sents.append(para)
         if not fail:
             new_texts.append(sents)
-            all_paras.append(para_sents) 
-    
+            all_paras.append(para_sents)
+
     save_path = args.data_path + f'-openai-num_beams={num_beams}-bigram={bigram}'
     Dataset.from_dict({'text': new_texts, 'para_text': all_paras}).save_to_disk(save_path)
     return new_texts, all_paras

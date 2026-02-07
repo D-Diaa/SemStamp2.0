@@ -107,7 +107,7 @@ class ParaphraseContrastiveTrainer(Trainer):
         # print("---------------------------------")
 
         return (loss, text_outputs) if return_outputs else loss
-    
+
     # import this to make sure the trainer calls the right loss func during eval and prediction
     def prediction_step(
         self,

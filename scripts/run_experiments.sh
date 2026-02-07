@@ -191,7 +191,7 @@ run_experiment() {
         if [[ "${PARAPHRASER}" == "custom" && -n "${CUSTOM_MODEL}" ]]; then
             para_args="${para_args} --custom_model ${CUSTOM_MODEL} --custom_prompt ${CUSTOM_PROMPT}"
         fi
-        CUDA_VISIBLE_DEVICES=${gpu} python paraphrase_gen.py "${gen_path}" ${para_args}
+        CUDA_VISIBLE_DEVICES=${gpu} python -m paraphrasing "${gen_path}" ${para_args}
 
         echo "Paraphrasing completed at: $(date)"
 
@@ -214,7 +214,7 @@ run_experiment() {
         echo "=== DETECTION: ${mode} ==="
         echo "Input: ${para_path}"
 
-        CUDA_VISIBLE_DEVICES=${gpu} python detection.py "${para_path}" \
+        CUDA_VISIBLE_DEVICES=${gpu} python -m detection "${para_path}" \
             --detection_mode "${detection_mode}" \
             --sp_dim "${sp_dim}" \
             --human_text "${HUMAN_TEXT}" \

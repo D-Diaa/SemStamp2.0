@@ -47,7 +47,7 @@ from transformers.trainer_utils import (
 )
 from transformers.utils.versions import require_version
 
-from contrastive_trainer import ParaphraseContrastiveTrainer
+from training.contrastive_trainer import ParaphraseContrastiveTrainer
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -294,7 +294,7 @@ def main():
         revision=model_args.model_revision,
         # use_auth_token=True if model_args.use_auth_token else None,
     )
-    
+
     model = AutoModel.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -354,8 +354,8 @@ def main():
                 load_from_cache_file=not data_args.overwrite_cache,
                 desc="Running tokenizer on train dataset",
             )
-            
-        
+
+
         # Log a few random samples from the training set:
         for index in random.sample(range(len(train_dataset)), 3):
             logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")

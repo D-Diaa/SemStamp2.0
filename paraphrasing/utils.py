@@ -7,7 +7,7 @@ import backoff
 import torch
 import re
 from tqdm import trange
-from detection_utils import run_bert_score
+from detection.utils import run_bert_score
 
 
 device = 'cuda' if torch.cuda.is_available() else "cpu"
@@ -188,7 +188,7 @@ def accept_by_bigram_overlap(sent, para_sents, tokenizer, bert_threshold = 0.03)
     min_overlap = len(input_ids)
 
     bert_scores = [run_bert_score([sent], [para_sent]) for para_sent in para_sents]
-    
+
     # Sort by BERTScore descending to ensure the first candidate has the highest score
     sorted_indices = sorted(range(len(para_sents)), key=lambda i: bert_scores[i], reverse=True)
     para_sents = [para_sents[i] for i in sorted_indices]
@@ -216,7 +216,7 @@ def gen_prompt(sent, context):
 def gen_bigram_prompt(sent, context, num_beams):
   prompt = f'''Previous context: {context} \n Paraphrase in {num_beams} different ways and return a numbered list : {sent}'''
   return prompt
-  
+
 @backoff.on_exception(backoff.expo, openai.RateLimitError)
 def query_openai(client, prompt):
   while True:

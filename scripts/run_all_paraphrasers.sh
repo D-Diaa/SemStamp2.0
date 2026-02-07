@@ -22,7 +22,7 @@ for para in "${PARAPHRASERS[@]}"; do
     echo "########################################################"
     echo "# Running: ${para}"
     echo "########################################################"
-    bash run_experiments.sh ${COMMON_ARGS} --paraphraser "${para}"
+    bash scripts/run_experiments.sh ${COMMON_ARGS} --paraphraser "${para}"
 done
 
 # --- Custom paraphrasers × all prompts ---
@@ -33,7 +33,7 @@ for model in "${CUSTOM_MODELS[@]}"; do
         echo "########################################################"
         echo "# Running: custom | model=${model} | prompt=${prompt}"
         echo "########################################################"
-        bash run_experiments.sh ${COMMON_ARGS} \
+        bash scripts/run_experiments.sh ${COMMON_ARGS} \
             --paraphraser custom \
             --custom-model "${model}" \
             --custom-prompt "${prompt}"

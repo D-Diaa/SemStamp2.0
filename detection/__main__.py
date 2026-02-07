@@ -8,7 +8,7 @@ from datasets import load_from_disk
 from nltk.tokenize import sent_tokenize
 from sampling.sbert_lsh_model import SBERTLSHModel
 from sentence_transformers import SentenceTransformer
-from detection_utils import detect_kmeans, detect_lsh, run_bert_score, evaluate_z_scores, flatten_gens_and_paras
+from detection.utils import detect_kmeans, detect_lsh, run_bert_score, evaluate_z_scores, flatten_gens_and_paras
 
 
 def parse_args():
