@@ -301,7 +301,7 @@ def custom_paraphrase(texts, custom_model, device='cuda', bsz=1, custom_prompt='
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('data_path', type=str)
-    parser.add_argument('--model_path', type=str, default='AbeHou/opt-1.3b-semstamp')
+    parser.add_argument('--model_path', type=str, default='meta-llama/Llama-3.1-8B')
     parser.add_argument('--bsz', type=int, default=-1)
     parser.add_argument('--paraphraser', type=str,
                         default="parrot", choices=['parrot',
