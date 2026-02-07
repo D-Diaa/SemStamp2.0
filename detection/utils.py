@@ -4,40 +4,12 @@ from sampling.lsh_utils import get_mask_from_seed
 from sampling.kmeans_utils import get_cluster_mask, get_cluster_id
 import numpy as np
 import torch
-from bert_score import score as bert_score_func
 import matplotlib.pyplot as plt
 import os
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 rng = torch.Generator(device)
 
-
-def run_bert_score(gen_sents, para_sents, max_len=450, batch_size=32):
-    if not gen_sents or not para_sents:
-        return 0.0
-    # Filter out empty strings to avoid bert_score tokenizer errors
-    filtered = [(g, p) for g, p in zip(gen_sents, para_sents) if g.strip() and p.strip()]
-    if not filtered:
-        return 0.0
-    gen_sents, para_sents = zip(*filtered)
-    P, R, F1 = bert_score_func(
-        gen_sents, para_sents,
-        model_type="roberta-large",
-        device=device,
-        lang="en",
-        batch_size=batch_size
-    )
-    return torch.mean(F1).item()
-
-
-def flatten_gens_and_paras(gens, paras):
-    new_gens = []
-    new_paras = []
-    for gen, para in zip(gens, paras):
-        min_len = min(len(gen), len(para))
-        new_gens.extend(gen[:min_len])
-        new_paras.extend(para[:min_len])
-    return new_gens, new_paras
 
 
 def compute_zscore(n_watermark, n_test_sent, lmbd):

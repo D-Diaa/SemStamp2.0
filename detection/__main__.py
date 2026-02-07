@@ -1,6 +1,6 @@
 import argparse
+import csv
 import os
-import pandas as pd
 import torch
 import numpy as np
 from tqdm import trange
@@ -8,7 +8,7 @@ from datasets import load_from_disk
 from nltk.tokenize import sent_tokenize
 from sampling.sbert_lsh_model import SBERTLSHModel
 from sentence_transformers import SentenceTransformer
-from detection.utils import detect_kmeans, detect_lsh, run_bert_score, evaluate_z_scores, flatten_gens_and_paras
+from detection.utils import detect_kmeans, detect_lsh, evaluate_z_scores
 
 
 def parse_args():
@@ -74,33 +74,45 @@ def save_results(args, z_scores, para_scores, human_scores, gens, paras):
     print("Saving scores...")
     print(f"Average z-score of generations: {np.nanmean(z_scores):.3f}")
     print(f"Average z-score of human texts: {np.nanmean(human_scores):.3f}")
-    print(f"Average z-score of paraphrased texts: {np.nanmean(para_scores):.3f}")
 
     np.save(os.path.join(args.dataset_path, "z_scores.npy"), z_scores)
-    np.save(os.path.join(args.dataset_path, "para_z_scores.npy"), para_scores)
     np.save(os.path.join(args.dataset_path, "human_z_scores.npy"), human_scores)
+
+    if len(para_scores) > 0:
+        print(f"Average z-score of paraphrased texts: {np.nanmean(para_scores):.3f}")
+        np.save(os.path.join(args.dataset_path, "para_z_scores.npy"), para_scores)
 
     # Evaluate watermarked text detection (results_wm.csv)
     print("Evaluating watermarked z-scores...")
     wm_auroc, wm_fpr1, wm_fpr5 = evaluate_z_scores(z_scores, human_scores, args.dataset_path, suffix="_wm")
-    wm_metrics = [f"{wm_auroc:.3f}", f"{wm_fpr1:.3f}", f"{wm_fpr5:.3f}",
-                  f"{np.nanmean(z_scores):.3f}", f"{np.nanmean(human_scores):.3f}"]
-    wm_columns = ["auroc", "fpr1", "fpr5", "mean_z", "human_mean_z"]
-    df_wm = pd.DataFrame(data=[wm_metrics], columns=wm_columns)
-    df_wm.to_csv(os.path.join(args.dataset_path, "results_wm.csv"), sep="\t", index=False)
+    wm_results = {
+        "auroc": f"{wm_auroc:.3f}",
+        "fpr1": f"{wm_fpr1:.3f}",
+        "fpr5": f"{wm_fpr5:.3f}",
+        "mean_z": f"{np.nanmean(z_scores):.3f}",
+        "human_mean_z": f"{np.nanmean(human_scores):.3f}",
+    }
+    wm_csv_path = os.path.join(args.dataset_path, "results_wm.csv")
+    with open(wm_csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=wm_results.keys())
+        writer.writeheader()
+        writer.writerow(wm_results)
 
-    # Evaluate paraphrased text detection (results.csv)
-    print("Evaluating paraphrased z-scores...")
-    auroc, fpr1, fpr5 = evaluate_z_scores(para_scores, human_scores, args.dataset_path)
+    if len(para_scores) > 0:
+        # Evaluate paraphrased text detection (results.csv)
+        print("Evaluating paraphrased z-scores...")
+        auroc, fpr1, fpr5 = evaluate_z_scores(para_scores, human_scores, args.dataset_path)
 
-    print("Evaluating bert score...")
-    gen_sents, para_sents = flatten_gens_and_paras(gens, paras)
-    bert_score = run_bert_score(gen_sents, para_sents)
-
-    metrics = [f"{auroc:.3f}", f"{fpr1:.3f}", f"{fpr5:.3f}", f"{bert_score:.3f}"]
-    columns = ["auroc", "fpr1", "fpr5", "bert_score"]
-    df = pd.DataFrame(data=[metrics], columns=columns)
-    df.to_csv(os.path.join(args.dataset_path, "results.csv"), sep="\t", index=False)
+        para_results = {
+            "auroc": f"{auroc:.3f}",
+            "fpr1": f"{fpr1:.3f}",
+            "fpr5": f"{fpr5:.3f}",
+        }
+        para_csv_path = os.path.join(args.dataset_path, "results.csv")
+        with open(para_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=para_results.keys())
+            writer.writeheader()
+            writer.writerow(para_results)
 
 
 if __name__ == '__main__':
