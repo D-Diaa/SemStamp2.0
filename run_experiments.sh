@@ -21,6 +21,8 @@ PARA_BSZ=32
 CUSTOM_MODEL="DDiaa/WM-Removal-Unigram-Qwen2.5-3B"
 CUSTOM_PROMPT="standard"
 FORCE_SAMPLE=false
+QUALITY_CORPUS="data/c4-human"
+SKIP_QUALITY=false
 
 # Parse command line arguments
 usage() {
@@ -39,6 +41,8 @@ usage() {
     echo "  --custom-prompt NAME  Prompt style for custom paraphraser: standard, shuffle, combine (default: combine)"
     echo "  --para-bsz BATCH_SIZE    Batch size for paraphrasing (default: 32)"
     echo "  --modes MODES         Comma-separated modes to run (default: lsh,lsh_fixed,kmeans,kmeans_fixed)"
+    echo "  --corpus PATH         Corpus path for quality evaluation semantic entropy (required unless --skip-quality)"
+    echo "  --skip-quality        Skip quality evaluation step"
     echo "  --force-sample        Force re-sampling even if data already exists"
     echo "  -h, --help            Show this help message"
     exit 1
@@ -96,6 +100,14 @@ while [[ $# -gt 0 ]]; do
             MODES="$2"
             shift 2
             ;;
+        --corpus)
+            QUALITY_CORPUS="$2"
+            shift 2
+            ;;
+        --skip-quality)
+            SKIP_QUALITY=true
+            shift
+            ;;
         --force-sample)
             FORCE_SAMPLE=true
             shift
@@ -129,6 +141,7 @@ echo "Cluster centers: ${CC_PATH}"
 echo "Delta: ${DELTA}"
 echo "Human text: ${HUMAN_TEXT}"
 echo "Modes: ${MODES} (${NUM_TASKS} tasks)"
+echo "Quality eval: $( [[ "${SKIP_QUALITY}" == true ]] && echo "skipped" || echo "enabled (corpus: ${QUALITY_CORPUS:-${DATA_FOLDER}})" )"
 echo "=============================================="
 
 # Create logs directory
@@ -208,6 +221,20 @@ run_experiment() {
             ${extra_args}
 
         echo "Detection completed at: $(date)"
+
+        # Run quality evaluation
+        if [[ "${SKIP_QUALITY}" == false ]]; then
+            echo ""
+            echo "=== QUALITY EVALUATION: ${mode} ==="
+            echo "Input: ${para_path}"
+
+            CUDA_VISIBLE_DEVICES=${gpu} python -m quality "${para_path}" 512 \
+                --reference "${DATA_FOLDER}" \
+                --corpus "${QUALITY_CORPUS}"
+
+            echo "Quality evaluation completed at: $(date)"
+        fi
+
         echo ""
         echo "=== EXPERIMENT ${mode} COMPLETE ==="
 
@@ -375,8 +402,13 @@ for mode in "${TASK_MODES[@]}"; do
     fi
     if [[ -f "$results_file" ]]; then
         echo ""
-        echo "=== ${mode} ==="
+        echo "=== ${mode} (detection) ==="
         cat "$results_file"
+    fi
+    quality_file="$(dirname "$results_file")/eval_quality.csv"
+    if [[ -f "$quality_file" ]]; then
+        echo "=== ${mode} (quality) ==="
+        cat "$quality_file"
     fi
 done
 

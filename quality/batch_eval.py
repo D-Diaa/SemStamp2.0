@@ -2,7 +2,7 @@ import os
 import glob
 from datasets import load_from_disk
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from quality.eval_quality import eval_quality
+from quality.evaluator import eval_quality
 import csv
 import argparse
 
